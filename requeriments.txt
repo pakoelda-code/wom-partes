@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+python-multipart
+itsdangerous
+reportlab
+psycopg2-binary
+
