@@ -281,8 +281,7 @@ def _xml_escape(s: str) -> str:
 
 
 def _to_paragraph_text_multiline(s: str) -> str:
-    return _xml_escape(s or "").replace("
-", "<br/>")
+    return _xml_escape(s or "").replace(chr(10), "<br/>")
 
 
 def _query_partes_en_proceso_filtrado(
