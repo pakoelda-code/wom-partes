@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# WOM - Partes de Mantenimiento (WEB) - Migrado a Supabase (Postgres)
+# WOM - Partes de Mantenimiento (WEB) - Supabase (Postgres)
 #
 # Requisitos (requirements.txt):
 # fastapi
@@ -9,11 +9,10 @@
 # reportlab
 # psycopg2-binary
 #
-# Variables de entorno necesarias:
-# DATABASE_URL  (la de Supabase Pooler, p.ej. ...pooler.supabase.com:6543/postgres)
-# SESSION_SECRET (opcional pero recomendado)
+# Variables de entorno:
+# DATABASE_URL   (Supabase Pooler, p.ej. ...pooler.supabase.com:6543/postgres)
+# SESSION_SECRET (recomendado)
 
-import html
 import os
 import random
 import string
@@ -42,15 +41,21 @@ ESTADOS_ENCARGADO = [
 ]
 ESTADOS_FINALIZADOS = {"TRABAJO TERMINADO/REPARADO", "TRABAJO DESESTIMADO"}
 
+# Valor especial para indicar "TODAS" en formularios multi-select
+ALL_MARKER = "__TODAS__"
+
+
 # =========================
 # DB (Supabase Postgres)
 # =========================
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
+
 def _ensure_db_url() -> str:
     if not DATABASE_URL:
         raise RuntimeError("Falta DATABASE_URL en variables de entorno")
     return DATABASE_URL
+
 
 def db_conn():
     url = _ensure_db_url()
@@ -59,6 +64,7 @@ def db_conn():
         return psycopg2.connect(url, cursor_factory=RealDictCursor, sslmode="require")
     return psycopg2.connect(url, cursor_factory=RealDictCursor)
 
+
 def db_all(sql: str, params=()) -> List[Dict[str, Any]]:
     with db_conn() as conn:
         with conn.cursor() as cur:
@@ -66,15 +72,18 @@ def db_all(sql: str, params=()) -> List[Dict[str, Any]]:
             rows = cur.fetchall()
             return list(rows or [])
 
+
 def db_one(sql: str, params=()) -> Optional[Dict[str, Any]]:
     rows = db_all(sql, params)
     return rows[0] if rows else None
+
 
 def db_exec(sql: str, params=()) -> None:
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, params)
         conn.commit()
+
 
 def ensure_schema_and_seed() -> None:
     # Tablas
@@ -132,6 +141,7 @@ def ensure_schema_and_seed() -> None:
     db_exec("create index if not exists wom_tickets_created_at_idx on public.wom_tickets(created_at desc);")
     db_exec("create index if not exists wom_tickets_estado_idx on public.wom_tickets(estado_encargado);")
     db_exec("create index if not exists wom_tickets_user_idx on public.wom_tickets(created_by_code);")
+    db_exec("create index if not exists wom_tickets_room_idx on public.wom_tickets(room_name);")
 
     # Seed inicial si no hay usuarios
     count_users = db_one("select count(*)::int as n from public.wom_users;")
@@ -163,11 +173,13 @@ def ensure_schema_and_seed() -> None:
         on conflict (name) do nothing;
         """)
 
+
 # =========================
 # Helpers negocio
 # =========================
 def now_madrid() -> datetime:
     return datetime.now(TZ)
+
 
 def formatear_fecha_hora(dt_value) -> Tuple[str, str]:
     try:
@@ -183,6 +195,7 @@ def formatear_fecha_hora(dt_value) -> Tuple[str, str]:
     except Exception:
         return "??/??/????", "??:??"
 
+
 def get_user_by_code(code: str) -> Optional[Dict[str, str]]:
     c = (code or "").strip().upper()
     row = db_one(
@@ -193,9 +206,11 @@ def get_user_by_code(code: str) -> Optional[Dict[str, str]]:
         return None
     return {"codigo": row["code"].strip().upper(), "nombre": row["name"], "rol": row["role"]}
 
+
 def get_salas() -> List[str]:
     rows = db_all("select name from public.wom_rooms order by name asc;")
     return [r["name"] for r in rows]
+
 
 def generar_referencia() -> str:
     alfabeto = string.ascii_uppercase + string.digits
@@ -205,12 +220,11 @@ def generar_referencia() -> str:
         if not exists:
             return ref
 
-def es_finalizado_estado(estado: str) -> bool:
-    return (estado or "").strip() in ESTADOS_FINALIZADOS
 
 def ticket_por_ref(ref: str) -> Optional[Dict[str, Any]]:
     r = (ref or "").strip().upper()
     return db_one("select * from public.wom_tickets where referencia=%s;", (r,))
+
 
 def update_ticket(ref: str, set_sql: str, params: Tuple[Any, ...]) -> None:
     r = (ref or "").strip().upper()
@@ -219,27 +233,74 @@ def update_ticket(ref: str, set_sql: str, params: Tuple[Any, ...]) -> None:
         params + (r,)
     )
 
+
+def sanitize_salas_selection(salas_selected: Optional[List[str]]) -> Optional[List[str]]:
+    """
+    Devuelve:
+      - None  => sin filtro (TODAS)
+      - list  => filtro por esas salas
+    Reglas:
+      - Si selecciona TODAS o lista vacía -> None
+    """
+    if not salas_selected:
+        return None
+    cleaned = []
+    for s in salas_selected:
+        if not s:
+            continue
+        s = s.strip()
+        if not s:
+            continue
+        cleaned.append(s)
+    if not cleaned:
+        return None
+    if ALL_MARKER in cleaned:
+        return None
+    # Deduplicar manteniendo orden
+    seen = set()
+    out = []
+    for s in cleaned:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out or None
+
+
 # =========================
 # PDF (ReportLab Platypus)
 # =========================
 def _xml_escape(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+
 def _to_paragraph_text_multiline(s: str) -> str:
     return _xml_escape(s or "").replace("\n", "<br/>")
 
-def generar_pdf_partes_en_proceso() -> Path:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-    from reportlab.platypus.flowables import HRFlowable
 
-    rows = db_all("""
+def _query_partes_en_proceso_filtrado(salas_filtro: Optional[List[str]]) -> List[Dict[str, Any]]:
+    if salas_filtro:
+        return db_all("""
+            select
+              referencia,
+              created_at,
+              created_by_name,
+              room_name,
+              tipo,
+              descripcion,
+              solucionado_por_usuario,
+              reparacion_usuario,
+              visto_por_encargado,
+              estado_encargado,
+              observaciones_encargado
+            from public.wom_tickets
+            where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+              and room_name = any(%s)
+            order by created_at desc;
+        """, (salas_filtro,))
+    return db_all("""
         select
           referencia,
           created_at,
-          created_by_code,
           created_by_name,
           room_name,
           tipo,
@@ -253,6 +314,16 @@ def generar_pdf_partes_en_proceso() -> Path:
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
     """)
+
+
+def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.platypus.flowables import HRFlowable
+
+    rows = _query_partes_en_proceso_filtrado(salas_filtro)
 
     out_dir = Path.cwd()
     ts = now_madrid().strftime("%Y%m%d_%H%M%S")
@@ -281,11 +352,14 @@ def generar_pdf_partes_en_proceso() -> Path:
 
     story: List[Any] = []
     story.append(Paragraph("WOM - RELACIÓN DE PARTES EN PROCESO (NO FINALIZADOS)", title_style))
+
+    filtro_txt = "TODAS LAS SALAS" if not salas_filtro else ", ".join(salas_filtro)
+    story.append(Paragraph(f"Filtro de salas: {_xml_escape(filtro_txt)}", small))
     story.append(Paragraph(f"Generado: {now_madrid().strftime('%d/%m/%Y %H:%M')}", small))
     story.append(Spacer(1, 6))
 
     if not rows:
-        story.append(Paragraph("No hay partes en proceso/pedientes.", normal))
+        story.append(Paragraph("No hay partes en proceso/pedientes para el filtro seleccionado.", normal))
         doc.build(story)
         return out_path
 
@@ -295,7 +369,6 @@ def generar_pdf_partes_en_proceso() -> Path:
         sala = p.get("room_name") or ""
         tipo = p.get("tipo") or ""
         autor = p.get("created_by_name") or ""
-        autor_cod = p.get("created_by_code") or ""
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         estado = p.get("estado_encargado") or "SIN ESTADO"
 
@@ -307,7 +380,7 @@ def generar_pdf_partes_en_proceso() -> Path:
         story.append(Paragraph(f"<b>Fecha/Hora:</b> {_xml_escape(fecha)} {_xml_escape(hora)}", label))
         story.append(Paragraph(f"<b>Sala:</b> {_xml_escape(sala)}", label))
         story.append(Paragraph(f"<b>Tipo:</b> {_xml_escape(tipo)}", label))
-        story.append(Paragraph(f"<b>Creado por:</b> {_xml_escape(autor)} ({_xml_escape(autor_cod)})", label))
+        story.append(Paragraph(f"<b>Creado por:</b> {_xml_escape(autor)}", label))
         story.append(Paragraph(f"<b>Visto:</b> {_xml_escape(visto)} &nbsp;&nbsp; <b>Estado:</b> {_xml_escape(estado)}", label))
         story.append(Spacer(1, 4))
 
@@ -326,33 +399,14 @@ def generar_pdf_partes_en_proceso() -> Path:
     doc.build(story)
     return out_path
 
+
 # =========================
-# FASTAPI APP
+# HTML helpers
 # =========================
-app = FastAPI()
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "wom_local_secret_key_cambia_esto"))
+def h(s: Any) -> str:
+    import html
+    return html.escape("" if s is None else str(s))
 
-@app.on_event("startup")
-def _startup():
-    # Crea esquema y seed (por si no ejecutaste el SQL aún)
-    ensure_schema_and_seed()
-
-def user_from_session(request: Request):
-    return request.session.get("user")
-
-def require_login(request: Request):
-    u = user_from_session(request)
-    if not u:
-        return RedirectResponse("/", status_code=303)
-    return None
-
-def role_home_path(role: str) -> str:
-    role = (role or "").upper()
-    if role == "ENCARGADO":
-        return "/encargado"
-    if role == "JEFE":
-        return "/jefe"
-    return "/trabajador"
 
 def page(title: str, body: str) -> str:
     return f"""<!doctype html>
@@ -360,7 +414,7 @@ def page(title: str, body: str) -> str:
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>{html.escape(title)}</title>
+  <title>{h(title)}</title>
   <style>
     body{{font-family: -apple-system, system-ui, Arial; margin: 24px; max-width: 980px}}
     .card{{border:1px solid #ddd; border-radius:12px; padding:16px; margin:12px 0}}
@@ -373,22 +427,140 @@ def page(title: str, body: str) -> str:
     textarea{{min-height:140px}}
     .muted{{color:#666}}
     .top{{display:flex; justify-content:space-between; align-items:center; gap:10px}}
-    .pill{{display:inline-block; padding:4px 10px; border-radius:999px; border:1px solid #ddd; font-size:12px; margin-right:6px}}
+    .pill{{display:inline-block; padding:4px 10px; border-radius:999px; border:1px solid #ddd; font-size:12px; margin-right:6px; margin-top:6px}}
     table{{width:100%; border-collapse:collapse}}
     th,td{{text-align:left; padding:8px; border-bottom:1px solid #eee; vertical-align:top}}
     code{{background:#f6f6f6; padding:2px 6px; border-radius:6px}}
+    .ticket{{border:1px solid #eee; border-radius:12px; padding:12px; margin:12px 0}}
+    .ticket h3{{margin:0 0 6px 0}}
+    .hr{{border-top:1px solid #eee; margin:10px 0}}
   </style>
 </head>
 <body>
 {body}
 </body></html>"""
 
+
+def user_from_session(request: Request):
+    return request.session.get("user")
+
+
+def require_login(request: Request):
+    u = user_from_session(request)
+    if not u:
+        return RedirectResponse("/", status_code=303)
+    return None
+
+
+def role_home_path(role: str) -> str:
+    role = (role or "").upper()
+    if role == "ENCARGADO":
+        return "/encargado"
+    if role == "JEFE":
+        return "/jefe"
+    return "/trabajador"
+
+
+def salas_multiselect_html(salas: List[str], selected: Optional[List[str]], label: str) -> str:
+    selected = selected or [ALL_MARKER]
+    opts = []
+    sel_all = "selected" if (ALL_MARKER in selected) else ""
+    opts.append(f"<option value='{ALL_MARKER}' {sel_all}>TODAS</option>")
+    for s in salas:
+        sel = "selected" if (s in selected) else ""
+        opts.append(f"<option value='{h(s)}' {sel}>{h(s)}</option>")
+
+    return f"""
+      <label>{h(label)}</label>
+      <select name="salas" multiple size="{min(max(len(salas)+1, 5), 10)}" id="salas_select" onchange="enforceAllRule()">
+        {''.join(opts)}
+      </select>
+      <p class="muted" style="margin-top:8px">
+        Consejo: selecciona <b>TODAS</b> o selecciona una o varias salas. Si eliges TODAS, se ignorarán otras selecciones.
+      </p>
+      <script>
+        function enforceAllRule() {{
+          var sel = document.getElementById('salas_select');
+          var values = Array.from(sel.selectedOptions).map(o => o.value);
+          if (values.includes('{ALL_MARKER}') && values.length > 1) {{
+            for (var i=0; i<sel.options.length; i++) {{
+              sel.options[i].selected = (sel.options[i].value === '{ALL_MARKER}');
+            }}
+          }}
+        }}
+      </script>
+    """
+
+
+def render_ticket_blocks(rows: List[Dict[str, Any]], back_href: str, title: str, subtitle: str, show_link: bool = True) -> str:
+    blocks = []
+    for p in rows:
+        fecha, hora = formatear_fecha_hora(p.get("created_at"))
+        ref = (p.get("referencia") or "").strip()
+        visto = "Sí" if p.get("visto_por_encargado") else "No"
+        estado = p.get("estado_encargado") or "SIN ESTADO"
+        sol = bool(p.get("solucionado_por_usuario", False))
+
+        rep = (p.get("reparacion_usuario") or "").strip()
+        if sol:
+            rep_txt = rep if rep else "(No indicó reparación)"
+        else:
+            rep_txt = "(No aplica)"
+
+        obs = (p.get("observaciones_encargado") or "").strip() or "(Sin observaciones)"
+        desc = (p.get("descripcion") or "").strip() or "(Sin descripción)"
+
+        header = f"{h(ref)}"
+        if show_link:
+            header = f"<a href='/parte/{h(ref)}'>{h(ref)}</a>"
+
+        blocks.append(f"""
+          <div class="ticket">
+            <h3>Referencia: {header}</h3>
+            <div class="pill">Fecha/Hora: {h(fecha)} {h(hora)}</div>
+            <div class="pill">Sala: {h(p.get('room_name',''))}</div>
+            <div class="pill">Tipo: {h(p.get('tipo',''))}</div>
+            <div class="pill">Creado por: {h(p.get('created_by_name',''))}</div>
+            <div class="pill">Visto: {h(visto)}</div>
+            <div class="pill">Estado: {h(estado)}</div>
+            <div class="hr"></div>
+            <p><b>Reparación realizada por el trabajador (si aplica):</b><br/>{h(rep_txt).replace(chr(10), "<br/>")}</p>
+            <p><b>Observaciones del encargado:</b><br/>{h(obs).replace(chr(10), "<br/>")}</p>
+            <p><b>Descripción del parte:</b><br/>{h(desc).replace(chr(10), "<br/>")}</p>
+          </div>
+        """)
+
+    body = f"""
+      <div class="top">
+        <div>
+          <h2>{h(title)}</h2>
+          <p class="muted">{h(subtitle)}</p>
+        </div>
+        <div><a class="btn2" href="{h(back_href)}">Volver</a></div>
+      </div>
+      <div class="card">
+        {''.join(blocks) if blocks else "<p>No hay partes para el filtro seleccionado.</p>"}
+      </div>
+    """
+    return body
+
+
 # =========================
-# Health
+# FASTAPI APP
 # =========================
+app = FastAPI()
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "wom_local_secret_key_cambia_esto"))
+
+
+@app.on_event("startup")
+def _startup():
+    ensure_schema_and_seed()
+
+
 @app.get("/health")
 def health():
     return PlainTextResponse("ok")
+
 
 # =========================
 # LOGIN / LOGOUT
@@ -402,7 +574,7 @@ def login_page(request: Request):
     body = f"""
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-      <p class="muted">Acceso web (Supabase).</p>
+      <p class="muted"><i>Versión 1.2 Enero 2026</i></p>
       <form method="post" action="/login">
         <label>Código personal</label>
         <input name="codigo" placeholder="Ej: I001A" autocomplete="off"/>
@@ -414,19 +586,21 @@ def login_page(request: Request):
     """
     return page("Login", body)
 
+
 @app.post("/login")
 def do_login(request: Request, codigo: str = Form(...)):
     info = get_user_by_code(codigo)
     if not info:
         return HTMLResponse(page("Login", f"""
-          <div class="card">
+          <div class='card'>
             <h3>Código no reconocido</h3>
-            <p><a class="btn2" href="/">Volver</a></p>
+            <p><a class='btn2' href='/'>Volver</a></p>
           </div>
         """), status_code=400)
 
     request.session["user"] = info
     return RedirectResponse("/home", status_code=303)
+
 
 @app.get("/home")
 def home(request: Request):
@@ -436,10 +610,12 @@ def home(request: Request):
     u = user_from_session(request)
     return RedirectResponse(role_home_path(u.get("rol", "")), status_code=303)
 
+
 @app.get("/logout")
 def logout(request: Request):
     request.session.clear()
     return RedirectResponse("/", status_code=303)
+
 
 # =========================
 # TRABAJADOR
@@ -457,7 +633,7 @@ def worker_menu(request: Request):
     <div class="top">
       <div>
         <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-        <p>Hola <b>{html.escape(u["nombre"])}</b>! Comencemos a dar un parte...</p>
+        <p>Hola <b>{h(u["nombre"])}</b>! Comencemos a dar un parte...</p>
       </div>
       <div><a class="btn2" href="/logout">Salir</a></div>
     </div>
@@ -465,12 +641,13 @@ def worker_menu(request: Request):
     <div class="card">
       <div class="row">
         <a class="btn" href="/trabajador/nuevo">Crear nuevo parte</a>
-        <a class="btn" href="/trabajador/activos">Ver mis partes en proceso</a>
-        <a class="btn" href="/trabajador/finalizados">Ver mis partes finalizados</a>
+        <a class="btn" href="/trabajador/activos">Ver partes en proceso</a>
+        <a class="btn" href="/trabajador/finalizados">Ver partes finalizados</a>
       </div>
     </div>
     """
     return page("Trabajador", body)
+
 
 @app.get("/trabajador/nuevo", response_class=HTMLResponse)
 def worker_new_form(request: Request):
@@ -483,18 +660,18 @@ def worker_new_form(request: Request):
 
     ref = generar_referencia()
     salas = get_salas()
-    salas_opts = "".join([f"<option value='{html.escape(s)}'>{html.escape(s)}</option>" for s in salas])
-    tipos_opts = "".join([f"<option value='{html.escape(t)}'>{html.escape(t)}</option>" for t in TIPOS])
+    salas_opts = "".join([f"<option value='{h(s)}'>{h(s)}</option>" for s in salas])
+    tipos_opts = "".join([f"<option value='{h(t)}'>{h(t)}</option>" for t in TIPOS])
 
     body = f"""
     <div class="top">
-      <div><h2>Nuevo parte</h2><p class="muted">Referencia generada: <code>{ref}</code> (anótala)</p></div>
+      <div><h2>Nuevo parte</h2><p class="muted">Referencia generada: <code>{h(ref)}</code> (anótala)</p></div>
       <div><a class="btn2" href="/trabajador">Volver</a></div>
     </div>
 
     <div class="card">
       <form method="post" action="/trabajador/nuevo">
-        <input type="hidden" name="referencia" value="{ref}"/>
+        <input type="hidden" name="referencia" value="{h(ref)}"/>
 
         <label>Sala</label>
         <select name="sala">{salas_opts}</select>
@@ -541,6 +718,7 @@ def worker_new_form(request: Request):
     """
     return page("Nuevo parte", body)
 
+
 @app.post("/trabajador/nuevo")
 def worker_new_submit(
     request: Request,
@@ -580,6 +758,7 @@ def worker_new_submit(
 
     return RedirectResponse(f"/parte/{ref}", status_code=303)
 
+
 @app.get("/trabajador/activos", response_class=HTMLResponse)
 def worker_activos(request: Request):
     r = require_login(request)
@@ -590,41 +769,43 @@ def worker_activos(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all("""
-        select referencia, created_at, room_name, tipo, estado_encargado, visto_por_encargado
+        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
         from public.wom_tickets
-        where created_by_code=%s
-          and estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+        where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """, (u["codigo"],))
+    """)
 
     trs = ""
     for p in rows:
-        f, h = formatear_fecha_hora(p.get("created_at"))
+        f, hhh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
+        ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
-          <td><a href="/parte/{html.escape(p["referencia"].strip())}">{html.escape(p["referencia"].strip())}</a></td>
-          <td>{html.escape(f)} {html.escape(h)}</td>
-          <td>{html.escape(p.get("room_name",""))}</td>
-          <td>{html.escape(p.get("tipo",""))}</td>
-          <td>{html.escape(p.get("estado_encargado","SIN ESTADO"))}</td>
-          <td>{visto}</td>
+          <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
+          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(p.get("created_by_name",""))}</td>
+          <td>{h(p.get("room_name",""))}</td>
+          <td>{h(p.get("tipo",""))}</td>
+          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{h(visto)}</td>
         </tr>
         """
 
     body = f"""
     <div class="top">
-      <div><h2>Mis partes en proceso</h2><p class="muted">No terminados ni desestimados.</p></div>
+      <div><h2>Partes en proceso</h2><p class="muted">Listado de todos los partes no finalizados.</p></div>
       <div><a class="btn2" href="/trabajador">Volver</a></div>
     </div>
     <div class="card">
       <table>
-        <thead><tr><th>Ref</th><th>Fecha</th><th>Sala</th><th>Tipo</th><th>Estado</th><th>Visto</th></tr></thead>
-        <tbody>{trs or "<tr><td colspan='6'>No hay partes.</td></tr>"}</tbody>
+        <thead><tr><th>Ref</th><th>Fecha</th><th>Autor</th><th>Sala</th><th>Tipo</th><th>Estado</th><th>Visto</th></tr></thead>
+        <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
     """
     return page("En proceso", body)
+
 
 @app.get("/trabajador/finalizados", response_class=HTMLResponse)
 def worker_finalizados(request: Request):
@@ -636,41 +817,43 @@ def worker_finalizados(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all("""
-        select referencia, created_at, room_name, tipo, estado_encargado, visto_por_encargado
+        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
         from public.wom_tickets
-        where created_by_code=%s
-          and estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+        where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """, (u["codigo"],))
+    """)
 
     trs = ""
     for p in rows:
-        f, h = formatear_fecha_hora(p.get("created_at"))
+        f, hhh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
+        ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
-          <td><a href="/parte/{html.escape(p["referencia"].strip())}">{html.escape(p["referencia"].strip())}</a></td>
-          <td>{html.escape(f)} {html.escape(h)}</td>
-          <td>{html.escape(p.get("room_name",""))}</td>
-          <td>{html.escape(p.get("tipo",""))}</td>
-          <td>{html.escape(p.get("estado_encargado","SIN ESTADO"))}</td>
-          <td>{visto}</td>
+          <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
+          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(p.get("created_by_name",""))}</td>
+          <td>{h(p.get("room_name",""))}</td>
+          <td>{h(p.get("tipo",""))}</td>
+          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{h(visto)}</td>
         </tr>
         """
 
     body = f"""
     <div class="top">
-      <div><h2>Mis partes finalizados</h2></div>
+      <div><h2>Partes finalizados</h2><p class="muted">Listado de todos los partes terminados o desestimados.</p></div>
       <div><a class="btn2" href="/trabajador">Volver</a></div>
     </div>
     <div class="card">
       <table>
-        <thead><tr><th>Ref</th><th>Fecha</th><th>Sala</th><th>Tipo</th><th>Estado</th><th>Visto</th></tr></thead>
-        <tbody>{trs or "<tr><td colspan='6'>No hay partes.</td></tr>"}</tbody>
+        <thead><tr><th>Ref</th><th>Fecha</th><th>Autor</th><th>Sala</th><th>Tipo</th><th>Estado</th><th>Visto</th></tr></thead>
+        <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
     """
     return page("Finalizados", body)
+
 
 # =========================
 # JEFE
@@ -688,19 +871,21 @@ def jefe_menu(request: Request):
     <div class="top">
       <div>
         <h2>VISTA DE JEFATURA - PARTES WOM</h2>
-        <p>Bienvenido <b>{html.escape(u["nombre"])}</b>.</p>
+        <p>Bienvenido <b>{h(u["nombre"])}</b>.</p>
       </div>
       <div><a class="btn2" href="/logout">Salir</a></div>
     </div>
 
     <div class="card">
       <div class="row">
-        <a class="btn" href="/jefe/en_proceso">Consultar partes en proceso</a>
-        <a class="btn" href="/jefe/finalizados">Consultar partes finalizados</a>
+        <a class="btn" href="/jefe/en_proceso">Ver listado de partes en activo</a>
+        <a class="btn" href="/jefe/finalizados">Ver listado de partes finalizados</a>
+        <a class="btn" href="/jefe/consulta_en_proceso">Consulta de partes en proceso</a>
       </div>
     </div>
     """
     return page("Jefe", body)
+
 
 @app.get("/jefe/en_proceso", response_class=HTMLResponse)
 def jefe_en_proceso(request: Request):
@@ -720,23 +905,24 @@ def jefe_en_proceso(request: Request):
 
     trs = ""
     for p in rows:
-        f, h = formatear_fecha_hora(p.get("created_at"))
+        f, hhh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
+        ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
-          <td><a href="/parte/{html.escape(p["referencia"].strip())}">{html.escape(p["referencia"].strip())}</a></td>
-          <td>{html.escape(f)} {html.escape(h)}</td>
-          <td>{html.escape(p.get("created_by_name",""))}</td>
-          <td>{html.escape(p.get("room_name",""))}</td>
-          <td>{html.escape(p.get("tipo",""))}</td>
-          <td>{html.escape(p.get("estado_encargado","SIN ESTADO"))}</td>
-          <td>{visto}</td>
+          <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
+          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(p.get("created_by_name",""))}</td>
+          <td>{h(p.get("room_name",""))}</td>
+          <td>{h(p.get("tipo",""))}</td>
+          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{h(visto)}</td>
         </tr>
         """
 
     body = f"""
     <div class="top">
-      <div><h2>Partes en proceso</h2></div>
+      <div><h2>Partes en activo</h2></div>
       <div><a class="btn2" href="/jefe">Volver</a></div>
     </div>
     <div class="card">
@@ -746,7 +932,8 @@ def jefe_en_proceso(request: Request):
       </table>
     </div>
     """
-    return page("Jefe - En proceso", body)
+    return page("Jefe - En activo", body)
+
 
 @app.get("/jefe/finalizados", response_class=HTMLResponse)
 def jefe_finalizados(request: Request):
@@ -766,17 +953,18 @@ def jefe_finalizados(request: Request):
 
     trs = ""
     for p in rows:
-        f, h = formatear_fecha_hora(p.get("created_at"))
+        f, hhh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
+        ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
-          <td><a href="/parte/{html.escape(p["referencia"].strip())}">{html.escape(p["referencia"].strip())}</a></td>
-          <td>{html.escape(f)} {html.escape(h)}</td>
-          <td>{html.escape(p.get("created_by_name",""))}</td>
-          <td>{html.escape(p.get("room_name",""))}</td>
-          <td>{html.escape(p.get("tipo",""))}</td>
-          <td>{html.escape(p.get("estado_encargado","SIN ESTADO"))}</td>
-          <td>{visto}</td>
+          <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
+          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(p.get("created_by_name",""))}</td>
+          <td>{h(p.get("room_name",""))}</td>
+          <td>{h(p.get("tipo",""))}</td>
+          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{h(visto)}</td>
         </tr>
         """
 
@@ -794,6 +982,60 @@ def jefe_finalizados(request: Request):
     """
     return page("Jefe - Finalizados", body)
 
+
+@app.get("/jefe/consulta_en_proceso", response_class=HTMLResponse)
+def jefe_consulta_en_proceso_form(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "JEFE":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    salas = get_salas()
+    selector = salas_multiselect_html(salas, None, "Selecciona sala(s) para filtrar (o TODAS)")
+
+    body = f"""
+    <div class="top">
+      <div><h2>Consulta de partes en proceso</h2></div>
+      <div><a class="btn2" href="/jefe">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <form method="post" action="/jefe/consulta_en_proceso">
+        {selector}
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Ver partes</button>
+        </div>
+      </form>
+    </div>
+    """
+    return page("Jefe - Consulta", body)
+
+
+@app.post("/jefe/consulta_en_proceso", response_class=HTMLResponse)
+def jefe_consulta_en_proceso_result(request: Request, salas: List[str] = Form([])):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "JEFE":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    salas_filtro = sanitize_salas_selection(salas)
+    rows = _query_partes_en_proceso_filtrado(salas_filtro)
+
+    filtro_txt = "TODAS LAS SALAS" if not salas_filtro else ", ".join(salas_filtro)
+    body = render_ticket_blocks(
+        rows=rows,
+        back_href="/jefe",
+        title="Consulta de partes en proceso",
+        subtitle=f"Filtro de salas: {filtro_txt}",
+        show_link=True
+    )
+    return page("Jefe - Resultados", body)
+
+
 # =========================
 # DETALLE PARTE (común)
 # =========================
@@ -806,11 +1048,7 @@ def parte_detalle(request: Request, ref: str):
 
     p = ticket_por_ref(ref)
     if not p:
-        return HTMLResponse(page("No encontrado", f"<div class='card'><h3>No existe el parte {html.escape(ref)}</h3></div>"), status_code=404)
-
-    # permisos: trabajador solo ve los suyos
-    if u["rol"] == "TRABAJADOR" and (p.get("created_by_code") or "") != u["codigo"]:
-        return HTMLResponse(page("No permitido", "<div class='card'><h3>No permitido</h3></div>"), status_code=403)
+        return HTMLResponse(page("No encontrado", f"<div class='card'><h3>No existe el parte {h(ref)}</h3></div>"), status_code=404)
 
     fecha, hora = formatear_fecha_hora(p.get("created_at"))
     visto = "Sí" if p.get("visto_por_encargado") else "No"
@@ -824,7 +1062,7 @@ def parte_detalle(request: Request, ref: str):
         rep_html = f"""
         <div class="card">
           <h3>Reparación realizada por el trabajador</h3>
-          <p>{html.escape(rep if rep else "(No indicó reparación)").replace(chr(10),"<br/>")}</p>
+          <p>{h(rep if rep else "(No indicó reparación)").replace(chr(10),"<br/>")}</p>
         </div>
         """
 
@@ -833,7 +1071,7 @@ def parte_detalle(request: Request, ref: str):
         obs_html = f"""
         <div class="card">
           <h3>Observaciones del encargado</h3>
-          <p>{html.escape(obs).replace(chr(10),"<br/>")}</p>
+          <p>{h(obs).replace(chr(10),"<br/>")}</p>
         </div>
         """
 
@@ -841,18 +1079,18 @@ def parte_detalle(request: Request, ref: str):
     body = f"""
     <div class="top">
       <div>
-        <h2>Parte {html.escape((p.get("referencia") or "").strip())}</h2>
-        <div class="pill">Fecha: {html.escape(fecha)} {html.escape(hora)}</div>
-        <div class="pill">Visto: {visto}</div>
-        <div class="pill">Estado: {html.escape(estado)}</div>
+        <h2>Parte {h((p.get("referencia") or "").strip())}</h2>
+        <div class="pill">Fecha: {h(fecha)} {h(hora)}</div>
+        <div class="pill">Visto: {h(visto)}</div>
+        <div class="pill">Estado: {h(estado)}</div>
       </div>
-      <div><a class="btn2" href="{back}">Volver</a></div>
+      <div><a class="btn2" href="{h(back)}">Volver</a></div>
     </div>
 
     <div class="card">
-      <p><b>Sala:</b> {html.escape(p.get("room_name",""))}</p>
-      <p><b>Tipo:</b> {html.escape(p.get("tipo",""))}</p>
-      <p><b>Creado por:</b> {html.escape(p.get("created_by_name",""))} ({html.escape(p.get("created_by_code") or "")})</p>
+      <p><b>Sala:</b> {h(p.get("room_name",""))}</p>
+      <p><b>Tipo:</b> {h(p.get("tipo",""))}</p>
+      <p><b>Creado por:</b> {h(p.get("created_by_name",""))}</p>
       <p><b>¿Solucionado por el usuario?:</b> {"Sí" if sol else "No"}</p>
     </div>
 
@@ -861,24 +1099,24 @@ def parte_detalle(request: Request, ref: str):
 
     <div class="card">
       <h3>Descripción</h3>
-      <p>{html.escape(p.get("descripcion","")).replace(chr(10),"<br/>")}</p>
+      <p>{h(p.get("descripcion","")).replace(chr(10),"<br/>")}</p>
     </div>
     """
 
     if u["rol"] == "ENCARGADO":
         estados_opts = "".join([
-            f"<option value='{html.escape(e)}' {'selected' if e==estado else ''}>{html.escape(e)}</option>"
+            f"<option value='{h(e)}' {'selected' if e==estado else ''}>{h(e)}</option>"
             for e in ESTADOS_ENCARGADO
         ])
         body += f"""
         <div class="card">
           <h3>Acciones del encargado</h3>
 
-          <form method="post" action="/encargado/mark_visto/{html.escape((p.get("referencia") or "").strip())}">
+          <form method="post" action="/encargado/mark_visto/{h((p.get("referencia") or "").strip())}">
             <button class="btn" type="submit">Marcar como leído/visto</button>
           </form>
 
-          <form method="post" action="/encargado/set_estado/{html.escape((p.get("referencia") or "").strip())}" style="margin-top:12px">
+          <form method="post" action="/encargado/set_estado/{h((p.get("referencia") or "").strip())}" style="margin-top:12px">
             <label>Cambiar estado</label>
             <select name="estado">{estados_opts}</select>
             <div style="margin-top:10px">
@@ -886,9 +1124,9 @@ def parte_detalle(request: Request, ref: str):
             </div>
           </form>
 
-          <form method="post" action="/encargado/set_obs/{html.escape((p.get("referencia") or "").strip())}" style="margin-top:12px">
+          <form method="post" action="/encargado/set_obs/{h((p.get("referencia") or "").strip())}" style="margin-top:12px">
             <label>Observaciones del encargado (editable)</label>
-            <textarea name="obs">{html.escape(p.get("observaciones_encargado",""))}</textarea>
+            <textarea name="obs">{h(p.get("observaciones_encargado",""))}</textarea>
             <div style="margin-top:10px">
               <button class="btn" type="submit">Guardar observaciones</button>
             </div>
@@ -897,6 +1135,7 @@ def parte_detalle(request: Request, ref: str):
         """
 
     return page("Detalle", body)
+
 
 # =========================
 # ENCARGADO
@@ -914,7 +1153,7 @@ def admin_menu(request: Request):
     <div class="top">
       <div>
         <h2>CONTROL DE PARTES DE MANTENIMIENTO</h2>
-        <p>¡Bienvenido <b>{html.escape(u["nombre"]).upper()}</b>!</p>
+        <p>¡Bienvenido <b>{h(u["nombre"]).upper()}</b>!</p>
       </div>
       <div><a class="btn2" href="/logout">Salir</a></div>
     </div>
@@ -929,6 +1168,7 @@ def admin_menu(request: Request):
     </div>
     """
     return page("Encargado", body)
+
 
 @app.get("/encargado/pendientes", response_class=HTMLResponse)
 def admin_pendientes(request: Request):
@@ -948,17 +1188,18 @@ def admin_pendientes(request: Request):
 
     trs = ""
     for p in rows:
-        f, h = formatear_fecha_hora(p.get("created_at"))
+        f, hhh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
+        ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
-          <td><a href="/parte/{html.escape(p["referencia"].strip())}">{html.escape(p["referencia"].strip())}</a></td>
-          <td>{html.escape(f)} {html.escape(h)}</td>
-          <td>{html.escape(p.get("created_by_name",""))}</td>
-          <td>{html.escape(p.get("room_name",""))}</td>
-          <td>{html.escape(p.get("tipo",""))}</td>
-          <td>{html.escape(p.get("estado_encargado","SIN ESTADO"))}</td>
-          <td>{visto}</td>
+          <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
+          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(p.get("created_by_name",""))}</td>
+          <td>{h(p.get("room_name",""))}</td>
+          <td>{h(p.get("tipo",""))}</td>
+          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{h(visto)}</td>
         </tr>
         """
 
@@ -975,6 +1216,7 @@ def admin_pendientes(request: Request):
     </div>
     """
     return page("Pendientes", body)
+
 
 @app.get("/encargado/finalizados", response_class=HTMLResponse)
 def admin_finalizados(request: Request):
@@ -994,17 +1236,18 @@ def admin_finalizados(request: Request):
 
     trs = ""
     for p in rows:
-        f, h = formatear_fecha_hora(p.get("created_at"))
+        f, hhh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
+        ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
-          <td><a href="/parte/{html.escape(p["referencia"].strip())}">{html.escape(p["referencia"].strip())}</a></td>
-          <td>{html.escape(f)} {html.escape(h)}</td>
-          <td>{html.escape(p.get("created_by_name",""))}</td>
-          <td>{html.escape(p.get("room_name",""))}</td>
-          <td>{html.escape(p.get("tipo",""))}</td>
-          <td>{html.escape(p.get("estado_encargado","SIN ESTADO"))}</td>
-          <td>{visto}</td>
+          <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
+          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(p.get("created_by_name",""))}</td>
+          <td>{h(p.get("room_name",""))}</td>
+          <td>{h(p.get("tipo",""))}</td>
+          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{h(visto)}</td>
         </tr>
         """
 
@@ -1022,6 +1265,7 @@ def admin_finalizados(request: Request):
     """
     return page("Finalizados", body)
 
+
 @app.post("/encargado/mark_visto/{ref}")
 def admin_mark_visto(request: Request, ref: str):
     r = require_login(request)
@@ -1033,6 +1277,7 @@ def admin_mark_visto(request: Request, ref: str):
 
     update_ticket(ref, "visto_por_encargado=true", ())
     return RedirectResponse(f"/parte/{ref}", status_code=303)
+
 
 @app.post("/encargado/set_estado/{ref}")
 def admin_set_estado(request: Request, ref: str, estado: str = Form(...)):
@@ -1048,6 +1293,7 @@ def admin_set_estado(request: Request, ref: str, estado: str = Form(...)):
         update_ticket(ref, "estado_encargado=%s, visto_por_encargado=true", (est,))
     return RedirectResponse(f"/parte/{ref}", status_code=303)
 
+
 @app.post("/encargado/set_obs/{ref}")
 def admin_set_obs(request: Request, ref: str, obs: str = Form("")):
     r = require_login(request)
@@ -1059,6 +1305,7 @@ def admin_set_obs(request: Request, ref: str, obs: str = Form("")):
 
     update_ticket(ref, "observaciones_encargado=%s, visto_por_encargado=true", ((obs or "").strip(),))
     return RedirectResponse(f"/parte/{ref}", status_code=303)
+
 
 # =========================
 # ENCARGADO - Gestión de Partes
@@ -1088,8 +1335,9 @@ def admin_gestion_partes(request: Request):
     """
     return page("Gestión de Partes", body)
 
-@app.get("/encargado/pdf")
-def admin_pdf(request: Request):
+
+@app.get("/encargado/pdf", response_class=HTMLResponse)
+def admin_pdf_form(request: Request):
     r = require_login(request)
     if r:
         return r
@@ -1097,9 +1345,44 @@ def admin_pdf(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    pdf_path = generar_pdf_partes_en_proceso()
+    salas = get_salas()
+    selector = salas_multiselect_html(salas, None, "Selecciona sala(s) para generar el PDF (o TODAS)")
+
+    body = f"""
+    <div class="top">
+      <div><h2>Generar PDF - Partes en proceso</h2></div>
+      <div><a class="btn2" href="/encargado/gestion_partes">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <form method="post" action="/encargado/pdf">
+        {selector}
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Generar PDF</button>
+        </div>
+      </form>
+    </div>
+    """
+    return page("PDF - Filtro", body)
+
+
+@app.post("/encargado/pdf")
+def admin_pdf_generate(request: Request, salas: List[str] = Form([])):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    salas_filtro = sanitize_salas_selection(salas)
+    pdf_path = generar_pdf_partes_en_proceso(salas_filtro)
     return FileResponse(str(pdf_path), media_type="application/pdf", filename=pdf_path.name)
 
+
+# =========================
+# ENCARGADO - Eliminar partes
+# =========================
 @app.get("/encargado/eliminar_partes", response_class=HTMLResponse)
 def admin_eliminar_partes_menu(request: Request):
     r = require_login(request)
@@ -1124,6 +1407,7 @@ def admin_eliminar_partes_menu(request: Request):
     </div>
     """
     return page("Eliminar partes", body)
+
 
 @app.get("/encargado/eliminar_partes/lista", response_class=HTMLResponse)
 def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
@@ -1154,22 +1438,22 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
 
     trs = ""
     for p in rows:
-        f, h = formatear_fecha_hora(p.get("created_at"))
+        f, hhh = formatear_fecha_hora(p.get("created_at"))
         ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
-          <td>{html.escape(ref)}</td>
-          <td>{html.escape(f)} {html.escape(h)}</td>
-          <td>{html.escape(p.get("created_by_name",""))}</td>
-          <td>{html.escape(p.get("room_name",""))}</td>
-          <td>{html.escape(p.get("estado_encargado","SIN ESTADO"))}</td>
-          <td><a class="btn danger" href="/encargado/eliminar_partes/confirmar/{html.escape(ref)}">Eliminar</a></td>
+          <td>{h(ref)}</td>
+          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(p.get("created_by_name",""))}</td>
+          <td>{h(p.get("room_name",""))}</td>
+          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td><a class="btn danger" href="/encargado/eliminar_partes/confirmar/{h(ref)}">Eliminar</a></td>
         </tr>
         """
 
     body = f"""
     <div class="top">
-      <div><h2>Eliminar partes - {html.escape(titulo)}</h2></div>
+      <div><h2>Eliminar partes - {h(titulo)}</h2></div>
       <div><a class="btn2" href="/encargado/eliminar_partes">Volver</a></div>
     </div>
     <div class="card">
@@ -1180,6 +1464,7 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
     </div>
     """
     return page("Eliminar partes", body)
+
 
 @app.get("/encargado/eliminar_partes/confirmar/{ref}", response_class=HTMLResponse)
 def admin_eliminar_partes_confirmar(request: Request, ref: str):
@@ -1193,9 +1478,9 @@ def admin_eliminar_partes_confirmar(request: Request, ref: str):
     body = f"""
     <div class="card">
       <h2>Confirmación</h2>
-      <p>¿Realmente quiere eliminar el parte <b>{html.escape(ref)}</b>?</p>
+      <p>¿Realmente quiere eliminar el parte <b>{h(ref)}</b>?</p>
       <div class="row" style="margin-top:12px">
-        <form method="post" action="/encargado/eliminar_partes/confirmar/{html.escape(ref)}">
+        <form method="post" action="/encargado/eliminar_partes/confirmar/{h(ref)}">
           <button class="btn danger" type="submit">Sí, eliminar</button>
         </form>
         <a class="btn2" href="/encargado/eliminar_partes">No, volver</a>
@@ -1204,6 +1489,7 @@ def admin_eliminar_partes_confirmar(request: Request, ref: str):
     </div>
     """
     return page("Confirmar eliminación", body)
+
 
 @app.post("/encargado/eliminar_partes/confirmar/{ref}")
 def admin_eliminar_partes_do(request: Request, ref: str):
@@ -1218,8 +1504,9 @@ def admin_eliminar_partes_do(request: Request, ref: str):
     db_exec("delete from public.wom_tickets where referencia=%s;", (rref,))
     return RedirectResponse("/encargado/gestion_partes", status_code=303)
 
+
 # =========================
-# ENCARGADO - Gestión de Usuarios
+# ENCARGADO - Gestión de Usuarios (códigos SOLO aquí)
 # =========================
 @app.get("/encargado/gestion_usuarios", response_class=HTMLResponse)
 def admin_gestion_usuarios(request: Request):
@@ -1238,14 +1525,15 @@ def admin_gestion_usuarios(request: Request):
 
     <div class="card">
       <div class="row">
-        <a class="btn" href="/encargado/usuarios/listar">Listar Usuarios</a>
+        <a class="btn" href="/encargado/usuarios/listar">Listar Usuarios del sistema</a>
         <a class="btn danger" href="/encargado/usuarios/eliminar">Eliminar Usuario</a>
         <a class="btn" href="/encargado/usuarios/crear">Crear Usuario</a>
-        <a class="btn" href="/encargado/salas">Gestionar Salas de Escape</a>
+        <a class="btn" href="/encargado/salas">Gestionar las Salas de Escape</a>
       </div>
     </div>
     """
     return page("Gestión de Usuarios", body)
+
 
 @app.get("/encargado/usuarios/listar", response_class=HTMLResponse)
 def admin_listar_usuarios(request: Request):
@@ -1260,7 +1548,7 @@ def admin_listar_usuarios(request: Request):
 
     rows = ""
     for us in users:
-        rows += f"<tr><td>{html.escape(us['code'])}</td><td>{html.escape(us['name'])}</td><td>{html.escape(us['role'])}</td></tr>"
+        rows += f"<tr><td>{h(us['code'])}</td><td>{h(us['name'])}</td><td>{h(us['role'])}</td></tr>"
 
     body = f"""
     <div class="top">
@@ -1277,6 +1565,7 @@ def admin_listar_usuarios(request: Request):
     </div>
     """
     return page("Listar Usuarios", body)
+
 
 @app.get("/encargado/usuarios/crear", response_class=HTMLResponse)
 def admin_crear_usuario_form(request: Request):
@@ -1316,6 +1605,7 @@ def admin_crear_usuario_form(request: Request):
     """
     return page("Crear Usuario", body)
 
+
 @app.post("/encargado/usuarios/crear")
 def admin_crear_usuario_do(
     request: Request,
@@ -1339,10 +1629,11 @@ def admin_crear_usuario_do(
 
     exists = db_one("select 1 as x from public.wom_users where upper(code)=upper(%s);", (c,))
     if exists:
-        return HTMLResponse(page("Error", f"<div class='card'><h3>Ya existe un usuario con código {html.escape(c)}</h3><p><a class='btn2' href='/encargado/usuarios/crear'>Volver</a></p></div>"), status_code=400)
+        return HTMLResponse(page("Error", f"<div class='card'><h3>Ya existe un usuario con código {h(c)}</h3><p><a class='btn2' href='/encargado/usuarios/crear'>Volver</a></p></div>"), status_code=400)
 
     db_exec("insert into public.wom_users (code, name, role) values (%s,%s,%s);", (c, n, rr))
     return RedirectResponse("/encargado/usuarios/listar", status_code=303)
+
 
 @app.get("/encargado/usuarios/eliminar", response_class=HTMLResponse)
 def admin_eliminar_usuario_lista(request: Request):
@@ -1359,12 +1650,12 @@ def admin_eliminar_usuario_lista(request: Request):
     for us in users:
         code = us["code"]
         disabled = (code.upper() == (u["codigo"].upper()))
-        btn = "(No puedes eliminarte)" if disabled else f"<a class='btn danger' href='/encargado/usuarios/eliminar/confirmar/{html.escape(code)}'>Eliminar</a>"
+        btn = "(No puedes eliminarte)" if disabled else f"<a class='btn danger' href='/encargado/usuarios/eliminar/confirmar/{h(code)}'>Eliminar</a>"
         rows += f"""
         <tr>
-          <td>{html.escape(code)}</td>
-          <td>{html.escape(us["name"])}</td>
-          <td>{html.escape(us["role"])}</td>
+          <td>{h(code)}</td>
+          <td>{h(us["name"])}</td>
+          <td>{h(us["role"])}</td>
           <td>{btn}</td>
         </tr>
         """
@@ -1385,6 +1676,7 @@ def admin_eliminar_usuario_lista(request: Request):
     """
     return page("Eliminar Usuario", body)
 
+
 @app.get("/encargado/usuarios/eliminar/confirmar/{codigo}", response_class=HTMLResponse)
 def admin_eliminar_usuario_confirmar(request: Request, codigo: str):
     r = require_login(request)
@@ -1401,9 +1693,9 @@ def admin_eliminar_usuario_confirmar(request: Request, codigo: str):
     body = f"""
     <div class="card">
       <h2>Confirmación</h2>
-      <p>¿Realmente quiere eliminar el usuario con código <b>{html.escape(c)}</b>?</p>
+      <p>¿Realmente quiere eliminar el usuario con código <b>{h(c)}</b>?</p>
       <div class="row" style="margin-top:12px">
-        <form method="post" action="/encargado/usuarios/eliminar/confirmar/{html.escape(c)}">
+        <form method="post" action="/encargado/usuarios/eliminar/confirmar/{h(c)}">
           <button class="btn danger" type="submit">Sí, eliminar</button>
         </form>
         <a class="btn2" href="/encargado/usuarios/eliminar">No, volver</a>
@@ -1411,6 +1703,7 @@ def admin_eliminar_usuario_confirmar(request: Request, codigo: str):
     </div>
     """
     return page("Confirmar eliminación usuario", body)
+
 
 @app.post("/encargado/usuarios/eliminar/confirmar/{codigo}")
 def admin_eliminar_usuario_do(request: Request, codigo: str):
@@ -1428,6 +1721,7 @@ def admin_eliminar_usuario_do(request: Request, codigo: str):
     db_exec("delete from public.wom_users where upper(code)=upper(%s);", (c,))
     return RedirectResponse("/encargado/usuarios/listar", status_code=303)
 
+
 # =========================
 # ENCARGADO - Salas
 # =========================
@@ -1441,7 +1735,7 @@ def admin_salas(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas = get_salas()
-    items = "".join([f"<li>{html.escape(s)}</li>" for s in salas]) or "<li>No hay salas.</li>"
+    items = "".join([f"<li>{h(s)}</li>" for s in salas]) or "<li>No hay salas.</li>"
 
     body = f"""
     <div class="top">
@@ -1467,6 +1761,7 @@ def admin_salas(request: Request):
     </div>
     """
     return page("Salas", body)
+
 
 @app.post("/encargado/salas")
 def admin_salas_add(request: Request, sala: str = Form(...)):
