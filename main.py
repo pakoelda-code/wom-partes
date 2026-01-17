@@ -41,8 +41,7 @@ ESTADOS_ENCARGADO = [
 ]
 ESTADOS_FINALIZADOS = {"TRABAJO TERMINADO/REPARADO", "TRABAJO DESESTIMADO"}
 
-# Valor especial para indicar "TODAS" en formularios multi-select
-ALL_MARKER = "__TODAS__"
+ALL_MARKER = "__TODAS__"  # valor especial en multiselect
 
 
 # =========================
@@ -59,7 +58,6 @@ def _ensure_db_url() -> str:
 
 def db_conn():
     url = _ensure_db_url()
-    # Forzamos SSL si la URL no lo especifica
     if "sslmode=" not in url:
         return psycopg2.connect(url, cursor_factory=RealDictCursor, sslmode="require")
     return psycopg2.connect(url, cursor_factory=RealDictCursor)
@@ -86,25 +84,29 @@ def db_exec(sql: str, params=()) -> None:
 
 
 def ensure_schema_and_seed() -> None:
-    # Tablas
-    db_exec("""
+    db_exec(
+        """
     create table if not exists public.wom_users (
       code text primary key,
       name text not null,
       role text not null check (role in ('TRABAJADOR','ENCARGADO','JEFE')),
       created_at timestamptz not null default now()
     );
-    """)
+    """
+    )
 
-    db_exec("""
+    db_exec(
+        """
     create table if not exists public.wom_rooms (
       id bigserial primary key,
       name text not null unique,
       created_at timestamptz not null default now()
     );
-    """)
+    """
+    )
 
-    db_exec("""
+    db_exec(
+        """
     create table if not exists public.wom_tickets (
       id bigserial primary key,
       referencia char(6) not null unique,
@@ -136,17 +138,26 @@ def ensure_schema_and_seed() -> None:
 
       updated_at timestamptz not null default now()
     );
-    """)
+    """
+    )
 
-    db_exec("create index if not exists wom_tickets_created_at_idx on public.wom_tickets(created_at desc);")
-    db_exec("create index if not exists wom_tickets_estado_idx on public.wom_tickets(estado_encargado);")
-    db_exec("create index if not exists wom_tickets_user_idx on public.wom_tickets(created_by_code);")
-    db_exec("create index if not exists wom_tickets_room_idx on public.wom_tickets(room_name);")
+    db_exec(
+        "create index if not exists wom_tickets_created_at_idx on public.wom_tickets(created_at desc);"
+    )
+    db_exec(
+        "create index if not exists wom_tickets_estado_idx on public.wom_tickets(estado_encargado);"
+    )
+    db_exec(
+        "create index if not exists wom_tickets_user_idx on public.wom_tickets(created_by_code);"
+    )
+    db_exec(
+        "create index if not exists wom_tickets_room_idx on public.wom_tickets(room_name);"
+    )
 
-    # Seed inicial si no hay usuarios
     count_users = db_one("select count(*)::int as n from public.wom_users;")
     if count_users and count_users["n"] == 0:
-        db_exec("""
+        db_exec(
+            """
         insert into public.wom_users (code, name, role) values
         ('P000A','Pako','ENCARGADO'),
         ('I001A','Isa','TRABAJADOR'),
@@ -159,19 +170,21 @@ def ensure_schema_and_seed() -> None:
         ('M001X','Manu','JEFE'),
         ('L002X','Luis','JEFE')
         on conflict (code) do nothing;
-        """)
+        """
+        )
 
-    # Seed salas si no hay
     count_rooms = db_one("select count(*)::int as n from public.wom_rooms;")
     if count_rooms and count_rooms["n"] == 0:
-        db_exec("""
+        db_exec(
+            """
         insert into public.wom_rooms (name) values
         ('SOTANO'),
         ('HAMMER KILLER'),
         ('RELIQUIAS DE JUDY'),
         ('PESADILLAS 2')
         on conflict (name) do nothing;
-        """)
+        """
+        )
 
 
 # =========================
@@ -200,7 +213,7 @@ def get_user_by_code(code: str) -> Optional[Dict[str, str]]:
     c = (code or "").strip().upper()
     row = db_one(
         "select code, name, role from public.wom_users where upper(code)=upper(%s) limit 1;",
-        (c,)
+        (c,),
     )
     if not row:
         return None
@@ -216,7 +229,9 @@ def generar_referencia() -> str:
     alfabeto = string.ascii_uppercase + string.digits
     while True:
         ref = "".join(random.choice(alfabeto) for _ in range(6))
-        exists = db_one("select 1 as x from public.wom_tickets where referencia=%s limit 1;", (ref,))
+        exists = db_one(
+            "select 1 as x from public.wom_tickets where referencia=%s limit 1;", (ref,)
+        )
         if not exists:
             return ref
 
@@ -230,21 +245,14 @@ def update_ticket(ref: str, set_sql: str, params: Tuple[Any, ...]) -> None:
     r = (ref or "").strip().upper()
     db_exec(
         f"update public.wom_tickets set {set_sql}, updated_at=now() where referencia=%s;",
-        params + (r,)
+        params + (r,),
     )
 
 
 def sanitize_salas_selection(salas_selected: Optional[List[str]]) -> Optional[List[str]]:
-    """
-    Devuelve:
-      - None  => sin filtro (TODAS)
-      - list  => filtro por esas salas
-    Reglas:
-      - Si selecciona TODAS o lista vacía -> None
-    """
     if not salas_selected:
         return None
-    cleaned = []
+    cleaned: List[str] = []
     for s in salas_selected:
         if not s:
             continue
@@ -256,9 +264,8 @@ def sanitize_salas_selection(salas_selected: Optional[List[str]]) -> Optional[Li
         return None
     if ALL_MARKER in cleaned:
         return None
-    # Deduplicar manteniendo orden
     seen = set()
-    out = []
+    out: List[str] = []
     for s in cleaned:
         if s not in seen:
             seen.add(s)
@@ -274,12 +281,16 @@ def _xml_escape(s: str) -> str:
 
 
 def _to_paragraph_text_multiline(s: str) -> str:
-    return _xml_escape(s or "").replace("\n", "<br/>")
+    return _xml_escape(s or "").replace("
+", "<br/>")
 
 
-def _query_partes_en_proceso_filtrado(salas_filtro: Optional[List[str]]) -> List[Dict[str, Any]]:
+def _query_partes_en_proceso_filtrado(
+    salas_filtro: Optional[List[str]],
+) -> List[Dict[str, Any]]:
     if salas_filtro:
-        return db_all("""
+        return db_all(
+            """
             select
               referencia,
               created_at,
@@ -296,8 +307,11 @@ def _query_partes_en_proceso_filtrado(salas_filtro: Optional[List[str]]) -> List
             where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
               and room_name = any(%s)
             order by created_at desc;
-        """, (salas_filtro,))
-    return db_all("""
+        """,
+            (salas_filtro,),
+        )
+    return db_all(
+        """
         select
           referencia,
           created_at,
@@ -313,7 +327,8 @@ def _query_partes_en_proceso_filtrado(salas_filtro: Optional[List[str]]) -> List
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """)
+    """
+    )
 
 
 def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
@@ -342,9 +357,6 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
 
     styles = getSampleStyleSheet()
     title_style = styles["Title"]
-    normal = styles["BodyText"]
-    normal.leading = 12
-    normal.spaceAfter = 6
 
     label = ParagraphStyle("Label", parent=styles["BodyText"], leading=12, spaceAfter=2)
     block = ParagraphStyle("Block", parent=styles["BodyText"], leading=12, spaceAfter=8)
@@ -359,7 +371,9 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
     story.append(Spacer(1, 6))
 
     if not rows:
-        story.append(Paragraph("No hay partes en proceso/pedientes para el filtro seleccionado.", normal))
+        story.append(
+            Paragraph("No hay partes en proceso/pedientes para el filtro seleccionado.", styles["BodyText"])
+        )
         doc.build(story)
         return out_path
 
@@ -381,7 +395,12 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
         story.append(Paragraph(f"<b>Sala:</b> {_xml_escape(sala)}", label))
         story.append(Paragraph(f"<b>Tipo:</b> {_xml_escape(tipo)}", label))
         story.append(Paragraph(f"<b>Creado por:</b> {_xml_escape(autor)}", label))
-        story.append(Paragraph(f"<b>Visto:</b> {_xml_escape(visto)} &nbsp;&nbsp; <b>Estado:</b> {_xml_escape(estado)}", label))
+        story.append(
+            Paragraph(
+                f"<b>Visto:</b> {_xml_escape(visto)} &nbsp;&nbsp; <b>Estado:</b> {_xml_escape(estado)}",
+                label,
+            )
+        )
         story.append(Spacer(1, 4))
 
         story.append(Paragraph("<b>Reparación realizada por el trabajador (si aplica):</b>", label))
@@ -405,6 +424,7 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
 # =========================
 def h(s: Any) -> str:
     import html
+
     return html.escape("" if s is None else str(s))
 
 
@@ -463,7 +483,7 @@ def role_home_path(role: str) -> str:
 
 def salas_multiselect_html(salas: List[str], selected: Optional[List[str]], label: str) -> str:
     selected = selected or [ALL_MARKER]
-    opts = []
+    opts: List[str] = []
     sel_all = "selected" if (ALL_MARKER in selected) else ""
     opts.append(f"<option value='{ALL_MARKER}' {sel_all}>TODAS</option>")
     for s in salas:
@@ -492,8 +512,14 @@ def salas_multiselect_html(salas: List[str], selected: Optional[List[str]], labe
     """
 
 
-def render_ticket_blocks(rows: List[Dict[str, Any]], back_href: str, title: str, subtitle: str, show_link: bool = True) -> str:
-    blocks = []
+def render_ticket_blocks(
+    rows: List[Dict[str, Any]],
+    back_href: str,
+    title: str,
+    subtitle: str,
+    show_link: bool = True,
+) -> str:
+    blocks: List[str] = []
     for p in rows:
         fecha, hora = formatear_fecha_hora(p.get("created_at"))
         ref = (p.get("referencia") or "").strip()
@@ -510,11 +536,12 @@ def render_ticket_blocks(rows: List[Dict[str, Any]], back_href: str, title: str,
         obs = (p.get("observaciones_encargado") or "").strip() or "(Sin observaciones)"
         desc = (p.get("descripcion") or "").strip() or "(Sin descripción)"
 
-        header = f"{h(ref)}"
+        header = h(ref)
         if show_link:
             header = f"<a href='/parte/{h(ref)}'>{h(ref)}</a>"
 
-        blocks.append(f"""
+        blocks.append(
+            f"""
           <div class="ticket">
             <h3>Referencia: {header}</h3>
             <div class="pill">Fecha/Hora: {h(fecha)} {h(hora)}</div>
@@ -528,7 +555,8 @@ def render_ticket_blocks(rows: List[Dict[str, Any]], back_href: str, title: str,
             <p><b>Observaciones del encargado:</b><br/>{h(obs).replace(chr(10), "<br/>")}</p>
             <p><b>Descripción del parte:</b><br/>{h(desc).replace(chr(10), "<br/>")}</p>
           </div>
-        """)
+        """
+        )
 
     body = f"""
       <div class="top">
@@ -549,7 +577,10 @@ def render_ticket_blocks(rows: List[Dict[str, Any]], back_href: str, title: str,
 # FASTAPI APP
 # =========================
 app = FastAPI()
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "wom_local_secret_key_cambia_esto"))
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET", "wom_local_secret_key_cambia_esto"),
+)
 
 
 @app.on_event("startup")
@@ -571,7 +602,7 @@ def login_page(request: Request):
     if u:
         return RedirectResponse("/home", status_code=303)
 
-    body = f"""
+    body = """
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
       <p class="muted"><i>Versión 1.2 Enero 2026</i></p>
@@ -591,12 +622,18 @@ def login_page(request: Request):
 def do_login(request: Request, codigo: str = Form(...)):
     info = get_user_by_code(codigo)
     if not info:
-        return HTMLResponse(page("Login", f"""
+        return HTMLResponse(
+            page(
+                "Login",
+                """
           <div class='card'>
             <h3>Código no reconocido</h3>
             <p><a class='btn2' href='/'>Volver</a></p>
           </div>
-        """), status_code=400)
+        """,
+            ),
+            status_code=400,
+        )
 
     request.session["user"] = info
     return RedirectResponse("/home", status_code=303)
@@ -618,7 +655,7 @@ def logout(request: Request):
 
 
 # =========================
-# TRABAJADOR
+# TRABAJADOR (menú + flujos)
 # =========================
 @app.get("/trabajador", response_class=HTMLResponse)
 def worker_menu(request: Request):
@@ -747,14 +784,17 @@ def worker_new_submit(
     room = db_one("select id, name from public.wom_rooms where name=%s;", (sala_name,))
     room_id = room["id"] if room else None
 
-    db_exec("""
+    db_exec(
+        """
         insert into public.wom_tickets
         (referencia, created_by_code, created_by_name, room_id, room_name, tipo, descripcion,
          solucionado_por_usuario, reparacion_usuario, visto_por_encargado, estado_encargado, observaciones_encargado)
         values
         (%s, %s, %s, %s, %s, %s, %s, %s, %s, false, 'SIN ESTADO', '')
         on conflict (referencia) do nothing;
-    """, (ref, u["codigo"], u["nombre"], room_id, sala_name, tipo_name, desc, sol, rep))
+    """,
+        (ref, u["codigo"], u["nombre"], room_id, sala_name, tipo_name, desc, sol, rep),
+    )
 
     return RedirectResponse(f"/parte/{ref}", status_code=303)
 
@@ -768,22 +808,24 @@ def worker_activos(request: Request):
     if u["rol"] != "TRABAJADOR":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    rows = db_all("""
+    rows = db_all(
+        """
         select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """)
+    """
+    )
 
     trs = ""
     for p in rows:
-        f, hhh = formatear_fecha_hora(p.get("created_at"))
+        f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
-          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
@@ -816,22 +858,24 @@ def worker_finalizados(request: Request):
     if u["rol"] != "TRABAJADOR":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    rows = db_all("""
+    rows = db_all(
+        """
         select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """)
+    """
+    )
 
     trs = ""
     for p in rows:
-        f, hhh = formatear_fecha_hora(p.get("created_at"))
+        f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
-          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
@@ -896,22 +940,24 @@ def jefe_en_proceso(request: Request):
     if u["rol"] != "JEFE":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    rows = db_all("""
+    rows = db_all(
+        """
         select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """)
+    """
+    )
 
     trs = ""
     for p in rows:
-        f, hhh = formatear_fecha_hora(p.get("created_at"))
+        f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
-          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
@@ -944,22 +990,24 @@ def jefe_finalizados(request: Request):
     if u["rol"] != "JEFE":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    rows = db_all("""
+    rows = db_all(
+        """
         select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """)
+    """
+    )
 
     trs = ""
     for p in rows:
-        f, hhh = formatear_fecha_hora(p.get("created_at"))
+        f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
-          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
@@ -1031,7 +1079,7 @@ def jefe_consulta_en_proceso_result(request: Request, salas: List[str] = Form([]
         back_href="/jefe",
         title="Consulta de partes en proceso",
         subtitle=f"Filtro de salas: {filtro_txt}",
-        show_link=True
+        show_link=True,
     )
     return page("Jefe - Resultados", body)
 
@@ -1048,7 +1096,13 @@ def parte_detalle(request: Request, ref: str):
 
     p = ticket_por_ref(ref)
     if not p:
-        return HTMLResponse(page("No encontrado", f"<div class='card'><h3>No existe el parte {h(ref)}</h3></div>"), status_code=404)
+        return HTMLResponse(
+            page(
+                "No encontrado",
+                f"<div class='card'><h3>No existe el parte {h(ref)}</h3></div>",
+            ),
+            status_code=404,
+        )
 
     fecha, hora = formatear_fecha_hora(p.get("created_at"))
     visto = "Sí" if p.get("visto_por_encargado") else "No"
@@ -1104,10 +1158,12 @@ def parte_detalle(request: Request, ref: str):
     """
 
     if u["rol"] == "ENCARGADO":
-        estados_opts = "".join([
-            f"<option value='{h(e)}' {'selected' if e==estado else ''}>{h(e)}</option>"
-            for e in ESTADOS_ENCARGADO
-        ])
+        estados_opts = "".join(
+            [
+                f"<option value='{h(e)}' {'selected' if e==estado else ''}>{h(e)}</option>"
+                for e in ESTADOS_ENCARGADO
+            ]
+        )
         body += f"""
         <div class="card">
           <h3>Acciones del encargado</h3>
@@ -1179,22 +1235,24 @@ def admin_pendientes(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    rows = db_all("""
+    rows = db_all(
+        """
         select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """)
+    """
+    )
 
     trs = ""
     for p in rows:
-        f, hhh = formatear_fecha_hora(p.get("created_at"))
+        f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
-          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
@@ -1227,22 +1285,24 @@ def admin_finalizados(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    rows = db_all("""
+    rows = db_all(
+        """
         select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """)
+    """
+    )
 
     trs = ""
     for p in rows:
-        f, hhh = formatear_fecha_hora(p.get("created_at"))
+        f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
-          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
@@ -1319,7 +1379,7 @@ def admin_gestion_partes(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = f"""
+    body = """
     <div class="top">
       <div><h2>Gestión de Partes</h2></div>
       <div><a class="btn2" href="/encargado">Volver</a></div>
@@ -1328,12 +1388,66 @@ def admin_gestion_partes(request: Request):
     <div class="card">
       <div class="row">
         <a class="btn" href="/encargado/pdf">Generar PDF de partes en proceso</a>
+        <a class="btn" href="/encargado/visualizar_en_proceso">Visualizar partes en Proceso</a>
         <a class="btn danger" href="/encargado/eliminar_partes">Eliminar partes del sistema</a>
       </div>
       <p class="muted" style="margin-top:10px">Eliminar un parte lo borra para todos los roles.</p>
     </div>
     """
     return page("Gestión de Partes", body)
+
+
+@app.get("/encargado/visualizar_en_proceso", response_class=HTMLResponse)
+def admin_visualizar_en_proceso_form(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    salas = get_salas()
+    selector = salas_multiselect_html(salas, None, "Selecciona sala(s) para filtrar (o TODAS)")
+
+    body = f"""
+    <div class="top">
+      <div><h2>Visualizar partes en proceso</h2></div>
+      <div><a class="btn2" href="/encargado/gestion_partes">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <form method="post" action="/encargado/visualizar_en_proceso">
+        {selector}
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Ver partes</button>
+        </div>
+      </form>
+    </div>
+    """
+    return page("Encargado - Visualizar", body)
+
+
+@app.post("/encargado/visualizar_en_proceso", response_class=HTMLResponse)
+def admin_visualizar_en_proceso_result(request: Request, salas: List[str] = Form([])):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    salas_filtro = sanitize_salas_selection(salas)
+    rows = _query_partes_en_proceso_filtrado(salas_filtro)
+
+    filtro_txt = "TODAS LAS SALAS" if not salas_filtro else ", ".join(salas_filtro)
+    body = render_ticket_blocks(
+        rows=rows,
+        back_href="/encargado/gestion_partes",
+        title="Partes en proceso (visualización)",
+        subtitle=f"Filtro de salas: {filtro_txt}",
+        show_link=True,
+    )
+    return page("Encargado - Visualizar", body)
 
 
 @app.get("/encargado/pdf", response_class=HTMLResponse)
@@ -1392,7 +1506,7 @@ def admin_eliminar_partes_menu(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = f"""
+    body = """
     <div class="top">
       <div><h2>Eliminar partes</h2></div>
       <div><a class="btn2" href="/encargado/gestion_partes">Volver</a></div>
@@ -1420,30 +1534,34 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
 
     finalizados = (tipo or "").lower() == "finalizados"
     if finalizados:
-        rows = db_all("""
+        rows = db_all(
+            """
             select referencia, created_at, created_by_name, room_name, estado_encargado
             from public.wom_tickets
             where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
             order by created_at desc;
-        """)
+        """
+        )
         titulo = "Finalizados"
     else:
-        rows = db_all("""
+        rows = db_all(
+            """
             select referencia, created_at, created_by_name, room_name, estado_encargado
             from public.wom_tickets
             where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
             order by created_at desc;
-        """)
+        """
+        )
         titulo = "Pendientes / en curso"
 
     trs = ""
     for p in rows:
-        f, hhh = formatear_fecha_hora(p.get("created_at"))
+        f, hh = formatear_fecha_hora(p.get("created_at"))
         ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
           <td>{h(ref)}</td>
-          <td>{h(f)} {h(hhh)}</td>
+          <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
@@ -1506,7 +1624,7 @@ def admin_eliminar_partes_do(request: Request, ref: str):
 
 
 # =========================
-# ENCARGADO - Gestión de Usuarios (códigos SOLO aquí)
+# ENCARGADO - Gestión de Usuarios
 # =========================
 @app.get("/encargado/gestion_usuarios", response_class=HTMLResponse)
 def admin_gestion_usuarios(request: Request):
@@ -1517,7 +1635,7 @@ def admin_gestion_usuarios(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = f"""
+    body = """
     <div class="top">
       <div><h2>Gestión de Usuarios</h2></div>
       <div><a class="btn2" href="/encargado">Volver</a></div>
@@ -1576,7 +1694,7 @@ def admin_crear_usuario_form(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = f"""
+    body = """
     <div class="top">
       <div><h2>Crear Usuario</h2></div>
       <div><a class="btn2" href="/encargado/gestion_usuarios">Volver</a></div>
@@ -1625,11 +1743,23 @@ def admin_crear_usuario_do(
     rr = (rol or "").strip().upper()
 
     if not c or not n or rr not in {"TRABAJADOR", "JEFE", "ENCARGADO"}:
-        return HTMLResponse(page("Error", "<div class='card'><h3>Datos inválidos</h3><p><a class='btn2' href='/encargado/usuarios/crear'>Volver</a></p></div>"), status_code=400)
+        return HTMLResponse(
+            page(
+                "Error",
+                "<div class='card'><h3>Datos inválidos</h3><p><a class='btn2' href='/encargado/usuarios/crear'>Volver</a></p></div>",
+            ),
+            status_code=400,
+        )
 
     exists = db_one("select 1 as x from public.wom_users where upper(code)=upper(%s);", (c,))
     if exists:
-        return HTMLResponse(page("Error", f"<div class='card'><h3>Ya existe un usuario con código {h(c)}</h3><p><a class='btn2' href='/encargado/usuarios/crear'>Volver</a></p></div>"), status_code=400)
+        return HTMLResponse(
+            page(
+                "Error",
+                f"<div class='card'><h3>Ya existe un usuario con código {h(c)}</h3><p><a class='btn2' href='/encargado/usuarios/crear'>Volver</a></p></div>",
+            ),
+            status_code=400,
+        )
 
     db_exec("insert into public.wom_users (code, name, role) values (%s,%s,%s);", (c, n, rr))
     return RedirectResponse("/encargado/usuarios/listar", status_code=303)
@@ -1649,7 +1779,7 @@ def admin_eliminar_usuario_lista(request: Request):
     rows = ""
     for us in users:
         code = us["code"]
-        disabled = (code.upper() == (u["codigo"].upper()))
+        disabled = code.upper() == u["codigo"].upper()
         btn = "(No puedes eliminarte)" if disabled else f"<a class='btn danger' href='/encargado/usuarios/eliminar/confirmar/{h(code)}'>Eliminar</a>"
         rows += f"""
         <tr>
@@ -1677,54 +1807,6 @@ def admin_eliminar_usuario_lista(request: Request):
     return page("Eliminar Usuario", body)
 
 
-@app.get("/encargado/usuarios/eliminar/confirmar/{codigo}", response_class=HTMLResponse)
-def admin_eliminar_usuario_confirmar(request: Request, codigo: str):
-    r = require_login(request)
-    if r:
-        return r
-    u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
-        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
-
-    c = (codigo or "").strip().upper()
-    if c == u["codigo"].upper():
-        return RedirectResponse("/encargado/usuarios/eliminar", status_code=303)
-
-    body = f"""
-    <div class="card">
-      <h2>Confirmación</h2>
-      <p>¿Realmente quiere eliminar el usuario con código <b>{h(c)}</b>?</p>
-      <div class="row" style="margin-top:12px">
-        <form method="post" action="/encargado/usuarios/eliminar/confirmar/{h(c)}">
-          <button class="btn danger" type="submit">Sí, eliminar</button>
-        </form>
-        <a class="btn2" href="/encargado/usuarios/eliminar">No, volver</a>
-      </div>
-    </div>
-    """
-    return page("Confirmar eliminación usuario", body)
-
-
-@app.post("/encargado/usuarios/eliminar/confirmar/{codigo}")
-def admin_eliminar_usuario_do(request: Request, codigo: str):
-    r = require_login(request)
-    if r:
-        return r
-    u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
-        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
-
-    c = (codigo or "").strip().upper()
-    if c == u["codigo"].upper():
-        return RedirectResponse("/encargado/usuarios/eliminar", status_code=303)
-
-    db_exec("delete from public.wom_users where upper(code)=upper(%s);", (c,))
-    return RedirectResponse("/encargado/usuarios/listar", status_code=303)
-
-
-# =========================
-# ENCARGADO - Salas
-# =========================
 @app.get("/encargado/salas", response_class=HTMLResponse)
 def admin_salas(request: Request):
     r = require_login(request)
