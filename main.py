@@ -32,6 +32,12 @@ TZ = ZoneInfo("Europe/Madrid")
 
 TIPOS = ["ELECTRÓNICA", "MOBILIARIO", "ESTRUCTURA", "ELEMENTOS SUELTOS", "OTROS/AS"]
 
+PRIORIDADES = [
+    ("URGENTE", "Urgente", "prio-urgente"),
+    ("MEDIO", "Medio", "prio-medio"),
+    ("DEMORABLE", "Demorable", "prio-demorable"),
+]
+
 ESTADOS_ENCARGADO = [
     "SIN ESTADO",
     "TRABAJO PENDIENTE/EN COLA",
@@ -85,28 +91,29 @@ def db_exec(sql: str, params=()) -> None:
 
 def ensure_schema_and_seed() -> None:
     db_exec(
-        """
+        '''
     create table if not exists public.wom_users (
       code text primary key,
       name text not null,
       role text not null check (role in ('TRABAJADOR','ENCARGADO','JEFE')),
       created_at timestamptz not null default now()
     );
-    """
+    '''
     )
 
     db_exec(
-        """
+        '''
     create table if not exists public.wom_rooms (
       id bigserial primary key,
       name text not null unique,
       created_at timestamptz not null default now()
     );
-    """
+    '''
     )
 
+    # Tabla principal
     db_exec(
-        """
+        '''
     create table if not exists public.wom_tickets (
       id bigserial primary key,
       referencia char(6) not null unique,
@@ -117,6 +124,8 @@ def ensure_schema_and_seed() -> None:
 
       room_id bigint references public.wom_rooms(id) on delete set null,
       room_name text not null,
+
+      priority text not null default 'MEDIO' check (priority in ('URGENTE','MEDIO','DEMORABLE')),
 
       tipo text not null check (tipo in ('ELECTRÓNICA','MOBILIARIO','ESTRUCTURA','ELEMENTOS SUELTOS','OTROS/AS')),
       descripcion text not null,
@@ -138,26 +147,41 @@ def ensure_schema_and_seed() -> None:
 
       updated_at timestamptz not null default now()
     );
-    """
+    '''
     )
 
+    # Migración suave: prioridad (por si la tabla ya existía)
+    db_exec("alter table public.wom_tickets add column if not exists priority text;")
+    db_exec("update public.wom_tickets set priority='MEDIO' where priority is null or trim(priority)='';")
+    db_exec("alter table public.wom_tickets alter column priority set default 'MEDIO';")
+    db_exec("alter table public.wom_tickets alter column priority set not null;")
     db_exec(
-        "create index if not exists wom_tickets_created_at_idx on public.wom_tickets(created_at desc);"
-    )
-    db_exec(
-        "create index if not exists wom_tickets_estado_idx on public.wom_tickets(estado_encargado);"
-    )
-    db_exec(
-        "create index if not exists wom_tickets_user_idx on public.wom_tickets(created_by_code);"
-    )
-    db_exec(
-        "create index if not exists wom_tickets_room_idx on public.wom_tickets(room_name);"
+        '''
+    do $$
+    begin
+      if not exists (
+        select 1 from pg_constraint
+        where conname = 'wom_tickets_priority_chk'
+      ) then
+        alter table public.wom_tickets
+          add constraint wom_tickets_priority_chk
+          check (priority in ('URGENTE','MEDIO','DEMORABLE'));
+      end if;
+    end $$;
+    '''
     )
 
+    db_exec("create index if not exists wom_tickets_created_at_idx on public.wom_tickets(created_at desc);")
+    db_exec("create index if not exists wom_tickets_estado_idx on public.wom_tickets(estado_encargado);")
+    db_exec("create index if not exists wom_tickets_user_idx on public.wom_tickets(created_by_code);")
+    db_exec("create index if not exists wom_tickets_room_idx on public.wom_tickets(room_name);")
+    db_exec("create index if not exists wom_tickets_priority_idx on public.wom_tickets(priority);")
+
+    # Seed users
     count_users = db_one("select count(*)::int as n from public.wom_users;")
     if count_users and count_users["n"] == 0:
         db_exec(
-            """
+            '''
         insert into public.wom_users (code, name, role) values
         ('P000A','Pako','ENCARGADO'),
         ('I001A','Isa','TRABAJADOR'),
@@ -170,20 +194,21 @@ def ensure_schema_and_seed() -> None:
         ('M001X','Manu','JEFE'),
         ('L002X','Luis','JEFE')
         on conflict (code) do nothing;
-        """
+        '''
         )
 
+    # Seed rooms
     count_rooms = db_one("select count(*)::int as n from public.wom_rooms;")
     if count_rooms and count_rooms["n"] == 0:
         db_exec(
-            """
+            '''
         insert into public.wom_rooms (name) values
         ('SOTANO'),
         ('HAMMER KILLER'),
         ('RELIQUIAS DE JUDY'),
         ('PESADILLAS 2')
         on conflict (name) do nothing;
-        """
+        '''
         )
 
 
@@ -223,6 +248,24 @@ def get_user_by_code(code: str) -> Optional[Dict[str, str]]:
 def get_salas() -> List[str]:
     rows = db_all("select name from public.wom_rooms order by name asc;")
     return [r["name"] for r in rows]
+
+
+def prio_class(prio: Any) -> str:
+    p = ("" if prio is None else str(prio)).strip().upper()
+    if p == "URGENTE":
+        return "prio-urgente"
+    if p == "DEMORABLE":
+        return "prio-demorable"
+    return "prio-medio"
+
+
+def prio_label(prio: Any) -> str:
+    p = ("" if prio is None else str(prio)).strip().upper()
+    if p == "URGENTE":
+        return "Urgente"
+    if p == "DEMORABLE":
+        return "Demorable"
+    return "Medio"
 
 
 def generar_referencia() -> str:
@@ -289,12 +332,13 @@ def _query_partes_en_proceso_filtrado(
 ) -> List[Dict[str, Any]]:
     if salas_filtro:
         return db_all(
-            """
+            '''
             select
               referencia,
               created_at,
               created_by_name,
               room_name,
+              priority,
               tipo,
               descripcion,
               solucionado_por_usuario,
@@ -306,16 +350,17 @@ def _query_partes_en_proceso_filtrado(
             where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
               and room_name = any(%s)
             order by created_at desc;
-        """,
+        ''',
             (salas_filtro,),
         )
     return db_all(
-        """
+        '''
         select
           referencia,
           created_at,
           created_by_name,
           room_name,
+          priority,
           tipo,
           descripcion,
           solucionado_por_usuario,
@@ -326,7 +371,7 @@ def _query_partes_en_proceso_filtrado(
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """
+    '''
     )
 
 
@@ -361,6 +406,14 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
     block = ParagraphStyle("Block", parent=styles["BodyText"], leading=12, spaceAfter=8)
     small = ParagraphStyle("Small", parent=styles["BodyText"], fontSize=9, leading=11, spaceAfter=6)
 
+    def prio_pdf(prio_val: Any) -> str:
+        p = ("" if prio_val is None else str(prio_val)).strip().upper()
+        if p == "URGENTE":
+            return "<font color='#cc0000'><b>URGENTE</b></font>"
+        if p == "DEMORABLE":
+            return "<font color='#15803d'><b>DEMORABLE</b></font>"
+        return "<font color='#d97706'><b>MEDIO</b></font>"
+
     story: List[Any] = []
     story.append(Paragraph("WOM - RELACIÓN DE PARTES EN PROCESO (NO FINALIZADOS)", title_style))
 
@@ -384,6 +437,7 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
         autor = p.get("created_by_name") or ""
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         estado = p.get("estado_encargado") or "SIN ESTADO"
+        prioridad = prio_pdf(p.get("priority"))
 
         descripcion = p.get("descripcion") or "(Sin descripción)"
         observaciones = (p.get("observaciones_encargado") or "").strip() or "(Sin observaciones)"
@@ -393,6 +447,7 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
         story.append(Paragraph(f"<b>Fecha/Hora:</b> {_xml_escape(fecha)} {_xml_escape(hora)}", label))
         story.append(Paragraph(f"<b>Sala:</b> {_xml_escape(sala)}", label))
         story.append(Paragraph(f"<b>Tipo:</b> {_xml_escape(tipo)}", label))
+        story.append(Paragraph(f"<b>Nivel de prioridad:</b> {prioridad}", label))
         story.append(Paragraph(f"<b>Creado por:</b> {_xml_escape(autor)}", label))
         story.append(
             Paragraph(
@@ -423,12 +478,11 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
 # =========================
 def h(s: Any) -> str:
     import html
-
     return html.escape("" if s is None else str(s))
 
 
 def page(title: str, body: str) -> str:
-    return f"""<!doctype html>
+    return f'''<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8"/>
@@ -453,11 +507,16 @@ def page(title: str, body: str) -> str:
     .ticket{{border:1px solid #eee; border-radius:12px; padding:12px; margin:12px 0}}
     .ticket h3{{margin:0 0 6px 0}}
     .hr{{border-top:1px solid #eee; margin:10px 0}}
+
+    /* Prioridades */
+    .prio-urgente{{color:#cc0000; font-weight:700}}
+    .prio-medio{{color:#d97706}}
+    .prio-demorable{{color:#15803d}}
   </style>
 </head>
 <body>
 {body}
-</body></html>"""
+</body></html>'''
 
 
 def user_from_session(request: Request):
@@ -489,7 +548,7 @@ def salas_multiselect_html(salas: List[str], selected: Optional[List[str]], labe
         sel = "selected" if (s in selected) else ""
         opts.append(f"<option value='{h(s)}' {sel}>{h(s)}</option>")
 
-    return f"""
+    return f'''
       <label>{h(label)}</label>
       <select name="salas" multiple size="{min(max(len(salas)+1, 5), 10)}" id="salas_select" onchange="enforceAllRule()">
         {''.join(opts)}
@@ -508,7 +567,7 @@ def salas_multiselect_html(salas: List[str], selected: Optional[List[str]], labe
           }}
         }}
       </script>
-    """
+    '''
 
 
 def render_ticket_blocks(
@@ -526,6 +585,10 @@ def render_ticket_blocks(
         estado = p.get("estado_encargado") or "SIN ESTADO"
         sol = bool(p.get("solucionado_por_usuario", False))
 
+        prio = (p.get("priority") or "MEDIO")
+        pc = prio_class(prio)
+        prio_txt = prio_label(prio)
+
         rep = (p.get("reparacion_usuario") or "").strip()
         if sol:
             rep_txt = rep if rep else "(No indicó reparación)"
@@ -540,24 +603,25 @@ def render_ticket_blocks(
             header = f"<a href='/parte/{h(ref)}'>{h(ref)}</a>"
 
         blocks.append(
-            f"""
+            f'''
           <div class="ticket">
             <h3>Referencia: {header}</h3>
             <div class="pill">Fecha/Hora: {h(fecha)} {h(hora)}</div>
             <div class="pill">Sala: {h(p.get('room_name',''))}</div>
             <div class="pill">Tipo: {h(p.get('tipo',''))}</div>
             <div class="pill">Creado por: {h(p.get('created_by_name',''))}</div>
+            <div class="pill">Prioridad: <span class="{pc}">{h(prio_txt)}</span></div>
             <div class="pill">Visto: {h(visto)}</div>
-            <div class="pill">Estado: {h(estado)}</div>
+            <div class="pill">Estado: <span class="{pc}">{h(estado)}</span></div>
             <div class="hr"></div>
             <p><b>Reparación realizada por el trabajador (si aplica):</b><br/>{h(rep_txt).replace(chr(10), "<br/>")}</p>
             <p><b>Observaciones del encargado:</b><br/>{h(obs).replace(chr(10), "<br/>")}</p>
             <p><b>Descripción del parte:</b><br/>{h(desc).replace(chr(10), "<br/>")}</p>
           </div>
-        """
+        '''
         )
 
-    body = f"""
+    body = f'''
       <div class="top">
         <div>
           <h2>{h(title)}</h2>
@@ -568,7 +632,7 @@ def render_ticket_blocks(
       <div class="card">
         {''.join(blocks) if blocks else "<p>No hay partes para el filtro seleccionado.</p>"}
       </div>
-    """
+    '''
     return body
 
 
@@ -601,10 +665,10 @@ def login_page(request: Request):
     if u:
         return RedirectResponse("/home", status_code=303)
 
-    body = """
+    body = '''
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-      <p class="muted"><i>Versión 1.2 Enero 2026</i></p>
+      <p class="muted"><i>Versión 1.3 Enero 2026</i></p>
       <form method="post" action="/login">
         <label>Código personal</label>
         <input name="codigo" placeholder="Ej: I001A" autocomplete="off"/>
@@ -613,7 +677,7 @@ def login_page(request: Request):
         </div>
       </form>
     </div>
-    """
+    '''
     return page("Login", body)
 
 
@@ -624,12 +688,12 @@ def do_login(request: Request, codigo: str = Form(...)):
         return HTMLResponse(
             page(
                 "Login",
-                """
+                '''
           <div class='card'>
             <h3>Código no reconocido</h3>
             <p><a class='btn2' href='/'>Volver</a></p>
           </div>
-        """,
+        ''',
             ),
             status_code=400,
         )
@@ -665,7 +729,7 @@ def worker_menu(request: Request):
     if u["rol"] != "TRABAJADOR":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div>
         <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
@@ -681,7 +745,7 @@ def worker_menu(request: Request):
         <a class="btn" href="/trabajador/finalizados">Ver partes finalizados</a>
       </div>
     </div>
-    """
+    '''
     return page("Trabajador", body)
 
 
@@ -699,7 +763,11 @@ def worker_new_form(request: Request):
     salas_opts = "".join([f"<option value='{h(s)}'>{h(s)}</option>" for s in salas])
     tipos_opts = "".join([f"<option value='{h(t)}'>{h(t)}</option>" for t in TIPOS])
 
-    body = f"""
+    prio_opts = ""
+    for value, label, _css in PRIORIDADES:
+        prio_opts += f"<option value='{h(value)}'>{h(label)}</option>"
+
+    body = f'''
     <div class="top">
       <div><h2>Nuevo parte</h2><p class="muted">Referencia generada: <code>{h(ref)}</code> (anótala)</p></div>
       <div><a class="btn2" href="/trabajador">Volver</a></div>
@@ -714,6 +782,16 @@ def worker_new_form(request: Request):
 
         <label>Tipo</label>
         <select name="tipo">{tipos_opts}</select>
+
+        <label>Nivel de prioridad</label>
+        <select name="prioridad" id="prioridad">
+          {prio_opts}
+        </select>
+        <p class="muted" style="margin-top:8px">
+          <span class="prio-urgente"><b>Urgente</b></span> ·
+          <span class="prio-medio">Medio</span> ·
+          <span class="prio-demorable">Demorable</span>
+        </p>
 
         <label>Descripción</label>
         <textarea name="descripcion" placeholder="Describe en detalle..."></textarea>
@@ -751,7 +829,7 @@ def worker_new_form(request: Request):
       }}
       toggleReparacion();
     </script>
-    """
+    '''
     return page("Nuevo parte", body)
 
 
@@ -761,6 +839,7 @@ def worker_new_submit(
     referencia: str = Form(...),
     sala: str = Form(...),
     tipo: str = Form(...),
+    prioridad: str = Form("MEDIO"),
     descripcion: str = Form(""),
     solucionado: str = Form("NO"),
     reparacion_usuario: str = Form(""),
@@ -777,6 +856,10 @@ def worker_new_submit(
     tipo_name = (tipo or "").strip()
     desc = (descripcion or "").strip() or "(Sin descripción)"
 
+    prio = (prioridad or "MEDIO").strip().upper()
+    if prio not in {"URGENTE", "MEDIO", "DEMORABLE"}:
+        prio = "MEDIO"
+
     sol = (solucionado or "").strip().upper() == "SI"
     rep = (reparacion_usuario or "").strip() if sol else ""
 
@@ -784,18 +867,23 @@ def worker_new_submit(
     room_id = room["id"] if room else None
 
     db_exec(
-        """
+        '''
         insert into public.wom_tickets
-        (referencia, created_by_code, created_by_name, room_id, room_name, tipo, descripcion,
+        (referencia, created_by_code, created_by_name, room_id, room_name, priority, tipo, descripcion,
          solucionado_por_usuario, reparacion_usuario, visto_por_encargado, estado_encargado, observaciones_encargado)
         values
-        (%s, %s, %s, %s, %s, %s, %s, %s, %s, false, 'SIN ESTADO', '')
+        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, 'SIN ESTADO', '')
         on conflict (referencia) do nothing;
-    """,
-        (ref, u["codigo"], u["nombre"], room_id, sala_name, tipo_name, desc, sol, rep),
+    ''',
+        (ref, u["codigo"], u["nombre"], room_id, sala_name, prio, tipo_name, desc, sol, rep),
     )
 
     return RedirectResponse(f"/parte/{ref}", status_code=303)
+
+
+def _estado_cell(estado: str, prio: Any) -> str:
+    cls = prio_class(prio)
+    return f"<span class='{cls}'>{h(estado)}</span>"
 
 
 @app.get("/trabajador/activos", response_class=HTMLResponse)
@@ -808,12 +896,12 @@ def worker_activos(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all(
-        """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
+        '''
+        select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """
+    '''
     )
 
     trs = ""
@@ -821,19 +909,20 @@ def worker_activos(request: Request):
         f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
-        trs += f"""
+        estado = p.get("estado_encargado", "SIN ESTADO")
+        trs += f'''
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
           <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{_estado_cell(str(estado), p.get("priority"))}</td>
           <td>{h(visto)}</td>
         </tr>
-        """
+        '''
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Partes en proceso</h2><p class="muted">Listado de todos los partes no finalizados.</p></div>
       <div><a class="btn2" href="/trabajador">Volver</a></div>
@@ -844,7 +933,7 @@ def worker_activos(request: Request):
         <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
-    """
+    '''
     return page("En proceso", body)
 
 
@@ -858,12 +947,12 @@ def worker_finalizados(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all(
-        """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
+        '''
+        select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """
+    '''
     )
 
     trs = ""
@@ -871,19 +960,20 @@ def worker_finalizados(request: Request):
         f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
-        trs += f"""
+        estado = p.get("estado_encargado", "SIN ESTADO")
+        trs += f'''
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
           <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{_estado_cell(str(estado), p.get("priority"))}</td>
           <td>{h(visto)}</td>
         </tr>
-        """
+        '''
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Partes finalizados</h2><p class="muted">Listado de todos los partes terminados o desestimados.</p></div>
       <div><a class="btn2" href="/trabajador">Volver</a></div>
@@ -894,7 +984,7 @@ def worker_finalizados(request: Request):
         <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
-    """
+    '''
     return page("Finalizados", body)
 
 
@@ -910,7 +1000,7 @@ def jefe_menu(request: Request):
     if u["rol"] != "JEFE":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div>
         <h2>VISTA DE JEFATURA - PARTES WOM</h2>
@@ -926,7 +1016,7 @@ def jefe_menu(request: Request):
         <a class="btn" href="/jefe/consulta_en_proceso">Consulta de partes en proceso</a>
       </div>
     </div>
-    """
+    '''
     return page("Jefe", body)
 
 
@@ -940,12 +1030,12 @@ def jefe_en_proceso(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all(
-        """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
+        '''
+        select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """
+    '''
     )
 
     trs = ""
@@ -953,19 +1043,20 @@ def jefe_en_proceso(request: Request):
         f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
-        trs += f"""
+        estado = p.get("estado_encargado", "SIN ESTADO")
+        trs += f'''
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
           <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{_estado_cell(str(estado), p.get("priority"))}</td>
           <td>{h(visto)}</td>
         </tr>
-        """
+        '''
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Partes en activo</h2></div>
       <div><a class="btn2" href="/jefe">Volver</a></div>
@@ -976,7 +1067,7 @@ def jefe_en_proceso(request: Request):
         <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
-    """
+    '''
     return page("Jefe - En activo", body)
 
 
@@ -990,12 +1081,12 @@ def jefe_finalizados(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all(
-        """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
+        '''
+        select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """
+    '''
     )
 
     trs = ""
@@ -1003,19 +1094,20 @@ def jefe_finalizados(request: Request):
         f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
-        trs += f"""
+        estado = p.get("estado_encargado", "SIN ESTADO")
+        trs += f'''
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
           <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{_estado_cell(str(estado), p.get("priority"))}</td>
           <td>{h(visto)}</td>
         </tr>
-        """
+        '''
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Partes finalizados</h2></div>
       <div><a class="btn2" href="/jefe">Volver</a></div>
@@ -1026,7 +1118,7 @@ def jefe_finalizados(request: Request):
         <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
-    """
+    '''
     return page("Jefe - Finalizados", body)
 
 
@@ -1042,7 +1134,7 @@ def jefe_consulta_en_proceso_form(request: Request):
     salas = get_salas()
     selector = salas_multiselect_html(salas, None, "Selecciona sala(s) para filtrar (o TODAS)")
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Consulta de partes en proceso</h2></div>
       <div><a class="btn2" href="/jefe">Volver</a></div>
@@ -1056,7 +1148,7 @@ def jefe_consulta_en_proceso_form(request: Request):
         </div>
       </form>
     </div>
-    """
+    '''
     return page("Jefe - Consulta", body)
 
 
@@ -1106,36 +1198,42 @@ def parte_detalle(request: Request, ref: str):
     fecha, hora = formatear_fecha_hora(p.get("created_at"))
     visto = "Sí" if p.get("visto_por_encargado") else "No"
     estado = p.get("estado_encargado") or "SIN ESTADO"
+
+    prio = p.get("priority") or "MEDIO"
+    pc = prio_class(prio)
+    prio_txt = prio_label(prio)
+
     sol = bool(p.get("solucionado_por_usuario", False))
     rep = (p.get("reparacion_usuario") or "").strip()
     obs = (p.get("observaciones_encargado") or "").strip()
 
     rep_html = ""
     if sol:
-        rep_html = f"""
+        rep_html = f'''
         <div class="card">
           <h3>Reparación realizada por el trabajador</h3>
           <p>{h(rep if rep else "(No indicó reparación)").replace(chr(10),"<br/>")}</p>
         </div>
-        """
+        '''
 
     obs_html = ""
     if obs:
-        obs_html = f"""
+        obs_html = f'''
         <div class="card">
           <h3>Observaciones del encargado</h3>
           <p>{h(obs).replace(chr(10),"<br/>")}</p>
         </div>
-        """
+        '''
 
     back = role_home_path(u["rol"])
-    body = f"""
+    body = f'''
     <div class="top">
       <div>
         <h2>Parte {h((p.get("referencia") or "").strip())}</h2>
         <div class="pill">Fecha: {h(fecha)} {h(hora)}</div>
+        <div class="pill">Prioridad: <span class="{pc}">{h(prio_txt)}</span></div>
         <div class="pill">Visto: {h(visto)}</div>
-        <div class="pill">Estado: {h(estado)}</div>
+        <div class="pill">Estado: <span class="{pc}">{h(estado)}</span></div>
       </div>
       <div><a class="btn2" href="{h(back)}">Volver</a></div>
     </div>
@@ -1143,6 +1241,7 @@ def parte_detalle(request: Request, ref: str):
     <div class="card">
       <p><b>Sala:</b> {h(p.get("room_name",""))}</p>
       <p><b>Tipo:</b> {h(p.get("tipo",""))}</p>
+      <p><b>Nivel de prioridad:</b> <span class="{pc}">{h(prio_txt)}</span></p>
       <p><b>Creado por:</b> {h(p.get("created_by_name",""))}</p>
       <p><b>¿Solucionado por el usuario?:</b> {"Sí" if sol else "No"}</p>
     </div>
@@ -1154,7 +1253,7 @@ def parte_detalle(request: Request, ref: str):
       <h3>Descripción</h3>
       <p>{h(p.get("descripcion","")).replace(chr(10),"<br/>")}</p>
     </div>
-    """
+    '''
 
     if u["rol"] == "ENCARGADO":
         estados_opts = "".join(
@@ -1163,7 +1262,7 @@ def parte_detalle(request: Request, ref: str):
                 for e in ESTADOS_ENCARGADO
             ]
         )
-        body += f"""
+        body += f'''
         <div class="card">
           <h3>Acciones del encargado</h3>
 
@@ -1187,7 +1286,7 @@ def parte_detalle(request: Request, ref: str):
             </div>
           </form>
         </div>
-        """
+        '''
 
     return page("Detalle", body)
 
@@ -1204,10 +1303,24 @@ def admin_menu(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = f"""
+    urgent = db_one(
+        '''
+        select count(*)::int as n
+        from public.wom_tickets
+        where priority='URGENTE'
+          and estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO');
+        '''
+    )
+    urgent_n = int(urgent["n"]) if urgent and urgent.get("n") is not None else 0
+    urgent_line = ""
+    if urgent_n > 0:
+        urgent_line = f"<p class='prio-urgente'><b>TIENE {urgent_n} PARTE/S URGENTE/S.</b></p>"
+
+    body = f'''
     <div class="top">
       <div>
         <h2>CONTROL DE PARTES DE MANTENIMIENTO</h2>
+        <h2 style="margin-top:6px">MENÚ DEL ENCARGADO</h2>
         <p>¡Bienvenido <b>{h(u["nombre"]).upper()}</b>!</p>
       </div>
       <div><a class="btn2" href="/logout">Salir</a></div>
@@ -1220,8 +1333,9 @@ def admin_menu(request: Request):
         <a class="btn" href="/encargado/gestion_partes">Gestión de Partes</a>
         <a class="btn" href="/encargado/gestion_usuarios">Gestión de Usuarios</a>
       </div>
+      {urgent_line}
     </div>
-    """
+    '''
     return page("Encargado", body)
 
 
@@ -1235,12 +1349,12 @@ def admin_pendientes(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all(
-        """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
+        '''
+        select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """
+    '''
     )
 
     trs = ""
@@ -1248,19 +1362,20 @@ def admin_pendientes(request: Request):
         f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
-        trs += f"""
+        estado = p.get("estado_encargado", "SIN ESTADO")
+        trs += f'''
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
           <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{_estado_cell(str(estado), p.get("priority"))}</td>
           <td>{h(visto)}</td>
         </tr>
-        """
+        '''
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Pendientes / en curso</h2></div>
       <div><a class="btn2" href="/encargado">Volver</a></div>
@@ -1271,7 +1386,7 @@ def admin_pendientes(request: Request):
         <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
-    """
+    '''
     return page("Pendientes", body)
 
 
@@ -1285,12 +1400,12 @@ def admin_finalizados(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all(
-        """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
+        '''
+        select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
-    """
+    '''
     )
 
     trs = ""
@@ -1298,19 +1413,20 @@ def admin_finalizados(request: Request):
         f, hh = formatear_fecha_hora(p.get("created_at"))
         visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
-        trs += f"""
+        estado = p.get("estado_encargado", "SIN ESTADO")
+        trs += f'''
         <tr>
           <td><a href="/parte/{h(ref)}">{h(ref)}</a></td>
           <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{_estado_cell(str(estado), p.get("priority"))}</td>
           <td>{h(visto)}</td>
         </tr>
-        """
+        '''
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Finalizados</h2></div>
       <div><a class="btn2" href="/encargado">Volver</a></div>
@@ -1321,7 +1437,7 @@ def admin_finalizados(request: Request):
         <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
-    """
+    '''
     return page("Finalizados", body)
 
 
@@ -1378,7 +1494,7 @@ def admin_gestion_partes(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = """
+    body = '''
     <div class="top">
       <div><h2>Gestión de Partes</h2></div>
       <div><a class="btn2" href="/encargado">Volver</a></div>
@@ -1392,7 +1508,7 @@ def admin_gestion_partes(request: Request):
       </div>
       <p class="muted" style="margin-top:10px">Eliminar un parte lo borra para todos los roles.</p>
     </div>
-    """
+    '''
     return page("Gestión de Partes", body)
 
 
@@ -1408,7 +1524,7 @@ def admin_visualizar_en_proceso_form(request: Request):
     salas = get_salas()
     selector = salas_multiselect_html(salas, None, "Selecciona sala(s) para filtrar (o TODAS)")
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Visualizar partes en proceso</h2></div>
       <div><a class="btn2" href="/encargado/gestion_partes">Volver</a></div>
@@ -1422,7 +1538,7 @@ def admin_visualizar_en_proceso_form(request: Request):
         </div>
       </form>
     </div>
-    """
+    '''
     return page("Encargado - Visualizar", body)
 
 
@@ -1461,7 +1577,7 @@ def admin_pdf_form(request: Request):
     salas = get_salas()
     selector = salas_multiselect_html(salas, None, "Selecciona sala(s) para generar el PDF (o TODAS)")
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Generar PDF - Partes en proceso</h2></div>
       <div><a class="btn2" href="/encargado/gestion_partes">Volver</a></div>
@@ -1475,7 +1591,7 @@ def admin_pdf_form(request: Request):
         </div>
       </form>
     </div>
-    """
+    '''
     return page("PDF - Filtro", body)
 
 
@@ -1505,7 +1621,7 @@ def admin_eliminar_partes_menu(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = """
+    body = '''
     <div class="top">
       <div><h2>Eliminar partes</h2></div>
       <div><a class="btn2" href="/encargado/gestion_partes">Volver</a></div>
@@ -1518,7 +1634,7 @@ def admin_eliminar_partes_menu(request: Request):
         <a class="btn danger" href="/encargado/eliminar_partes/lista?tipo=finalizados">Finalizados</a>
       </div>
     </div>
-    """
+    '''
     return page("Eliminar partes", body)
 
 
@@ -1534,22 +1650,22 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
     finalizados = (tipo or "").lower() == "finalizados"
     if finalizados:
         rows = db_all(
-            """
+            '''
             select referencia, created_at, created_by_name, room_name, estado_encargado
             from public.wom_tickets
             where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
             order by created_at desc;
-        """
+        '''
         )
         titulo = "Finalizados"
     else:
         rows = db_all(
-            """
+            '''
             select referencia, created_at, created_by_name, room_name, estado_encargado
             from public.wom_tickets
             where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
             order by created_at desc;
-        """
+        '''
         )
         titulo = "Pendientes / en curso"
 
@@ -1557,7 +1673,7 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
     for p in rows:
         f, hh = formatear_fecha_hora(p.get("created_at"))
         ref = (p.get("referencia") or "").strip()
-        trs += f"""
+        trs += f'''
         <tr>
           <td>{h(ref)}</td>
           <td>{h(f)} {h(hh)}</td>
@@ -1566,9 +1682,9 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
           <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
           <td><a class="btn danger" href="/encargado/eliminar_partes/confirmar/{h(ref)}">Eliminar</a></td>
         </tr>
-        """
+        '''
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Eliminar partes - {h(titulo)}</h2></div>
       <div><a class="btn2" href="/encargado/eliminar_partes">Volver</a></div>
@@ -1579,7 +1695,7 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
         <tbody>{trs or "<tr><td colspan='6'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
-    """
+    '''
     return page("Eliminar partes", body)
 
 
@@ -1592,7 +1708,7 @@ def admin_eliminar_partes_confirmar(request: Request, ref: str):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = f"""
+    body = f'''
     <div class="card">
       <h2>Confirmación</h2>
       <p>¿Realmente quiere eliminar el parte <b>{h(ref)}</b>?</p>
@@ -1604,7 +1720,7 @@ def admin_eliminar_partes_confirmar(request: Request, ref: str):
       </div>
       <p class="muted" style="margin-top:10px">Esta acción es irreversible.</p>
     </div>
-    """
+    '''
     return page("Confirmar eliminación", body)
 
 
@@ -1634,7 +1750,7 @@ def admin_gestion_usuarios(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = """
+    body = '''
     <div class="top">
       <div><h2>Gestión de Usuarios</h2></div>
       <div><a class="btn2" href="/encargado">Volver</a></div>
@@ -1648,7 +1764,7 @@ def admin_gestion_usuarios(request: Request):
         <a class="btn" href="/encargado/salas">Gestionar las Salas de Escape</a>
       </div>
     </div>
-    """
+    '''
     return page("Gestión de Usuarios", body)
 
 
@@ -1667,7 +1783,7 @@ def admin_listar_usuarios(request: Request):
     for us in users:
         rows += f"<tr><td>{h(us['code'])}</td><td>{h(us['name'])}</td><td>{h(us['role'])}</td></tr>"
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Usuarios del sistema</h2></div>
       <div><a class="btn2" href="/encargado/gestion_usuarios">Volver</a></div>
@@ -1680,7 +1796,7 @@ def admin_listar_usuarios(request: Request):
       </table>
       <p class="muted" style="margin-top:10px">Roles válidos: TRABAJADOR, JEFE, ENCARGADO</p>
     </div>
-    """
+    '''
     return page("Listar Usuarios", body)
 
 
@@ -1693,7 +1809,7 @@ def admin_crear_usuario_form(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    body = """
+    body = '''
     <div class="top">
       <div><h2>Crear Usuario</h2></div>
       <div><a class="btn2" href="/encargado/gestion_usuarios">Volver</a></div>
@@ -1719,7 +1835,7 @@ def admin_crear_usuario_form(request: Request):
         </div>
       </form>
     </div>
-    """
+    '''
     return page("Crear Usuario", body)
 
 
@@ -1780,16 +1896,16 @@ def admin_eliminar_usuario_lista(request: Request):
         code = us["code"]
         disabled = code.upper() == u["codigo"].upper()
         btn = "(No puedes eliminarte)" if disabled else f"<a class='btn danger' href='/encargado/usuarios/eliminar/confirmar/{h(code)}'>Eliminar</a>"
-        rows += f"""
+        rows += f'''
         <tr>
           <td>{h(code)}</td>
           <td>{h(us["name"])}</td>
           <td>{h(us["role"])}</td>
           <td>{btn}</td>
         </tr>
-        """
+        '''
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Eliminar Usuario</h2></div>
       <div><a class="btn2" href="/encargado/gestion_usuarios">Volver</a></div>
@@ -1802,7 +1918,7 @@ def admin_eliminar_usuario_lista(request: Request):
       </table>
       <p class="muted" style="margin-top:10px">Eliminar un usuario NO borra los partes existentes.</p>
     </div>
-    """
+    '''
     return page("Eliminar Usuario", body)
 
 
@@ -1818,7 +1934,7 @@ def admin_salas(request: Request):
     salas = get_salas()
     items = "".join([f"<li>{h(s)}</li>" for s in salas]) or "<li>No hay salas.</li>"
 
-    body = f"""
+    body = f'''
     <div class="top">
       <div><h2>Gestionar Salas de Escape</h2></div>
       <div><a class="btn2" href="/encargado/gestion_usuarios">Volver</a></div>
@@ -1840,7 +1956,7 @@ def admin_salas(request: Request):
       </form>
       <p class="muted" style="margin-top:10px">Estas salas aparecerán en el desplegable de “Nuevo parte”.</p>
     </div>
-    """
+    '''
     return page("Salas", body)
 
 
