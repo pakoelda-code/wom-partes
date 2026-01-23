@@ -995,12 +995,13 @@ def admin_new_submit(
         prio = "MEDIO"
 
     desc = (descripcion or "").strip()
-    sol = (solucionado or "NO").strip().upper()
-    if sol not in ("SI", "NO"):
-        sol = "NO"
+    sol_txt = (solucionado or "NO").strip().upper()
+    if sol_txt not in ("SI", "NO"):
+        sol_txt = "NO"
+    sol_bool = (sol_txt == "SI")
 
     rep = (reparacion_usuario or "").strip()
-    if sol != "SI":
+    if not sol_bool:
         rep = ""
 
     db_exec(
@@ -1025,7 +1026,7 @@ def admin_new_submit(
         )
         on conflict (referencia) do nothing;
     ''',
-        (ref, u["codigo"], u["nombre"], room_id, sala_name, prio, tipo_name, desc, sol, rep),
+        (ref, u["codigo"], u["nombre"], room_id, sala_name, prio, tipo_name, desc, sol_bool, rep),
     )
 
     return RedirectResponse(f"/parte/{ref}", status_code=303)
