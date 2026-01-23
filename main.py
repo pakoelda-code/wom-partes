@@ -898,7 +898,7 @@ def admin_new_form(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas = get_salas()
-    tipos = TIPOS_ANOMALIA
+    tipos = TIPOS
 
     sala_opts = "\n".join([f"<option value='{h(s['id'])}'>{h(s['name'])}</option>" for s in salas])
     tipo_opts = "\n".join([f"<option value='{h(t)}'>{h(t)}</option>" for t in tipos])
