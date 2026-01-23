@@ -219,6 +219,16 @@ def now_madrid() -> datetime:
     return datetime.now(TZ)
 
 
+def month_bounds(year: int, month: int) -> Tuple[datetime, datetime]:
+    """Devuelve (inicio, fin) del mes en zona horaria Madrid."""
+    start = datetime(year, month, 1, 0, 0, 0, tzinfo=TZ)
+    if month == 12:
+        end = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=TZ)
+    else:
+        end = datetime(year, month + 1, 1, 0, 0, 0, tzinfo=TZ)
+    return start, end
+
+
 def formatear_fecha_hora(dt_value) -> Tuple[str, str]:
     try:
         if isinstance(dt_value, str):
@@ -391,20 +401,20 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
     doc = SimpleDocTemplate(
         str(out_path),
         pagesize=A4,
-        leftMargin=18 * mm,
-        rightMargin=18 * mm,
-        topMargin=16 * mm,
-        bottomMargin=16 * mm,
+        leftMargin=10 * mm,
+        rightMargin=10 * mm,
+        topMargin=10 * mm,
+        bottomMargin=10 * mm,
         title="WOM - Relación de partes en proceso",
         author="WOM",
     )
 
     styles = getSampleStyleSheet()
-    title_style = styles["Title"]
+    title_style = ParagraphStyle("TitleSmall", parent=styles["Title"], fontSize=14, leading=16, spaceAfter=4)
 
-    label = ParagraphStyle("Label", parent=styles["BodyText"], leading=12, spaceAfter=2)
-    block = ParagraphStyle("Block", parent=styles["BodyText"], leading=12, spaceAfter=8)
-    small = ParagraphStyle("Small", parent=styles["BodyText"], fontSize=9, leading=11, spaceAfter=6)
+    label = ParagraphStyle("Label", parent=styles["BodyText"], fontSize=8.2, leading=9.4, spaceAfter=1)
+    block = ParagraphStyle("Block", parent=styles["BodyText"], fontSize=8.2, leading=9.4, spaceAfter=2)
+    small = ParagraphStyle("Small", parent=styles["BodyText"], fontSize=8.2, leading=9.4, spaceAfter=2)
 
     def prio_pdf(prio_val: Any) -> str:
         p = ("" if prio_val is None else str(prio_val)).strip().upper()
@@ -420,7 +430,7 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
     filtro_txt = "TODAS LAS SALAS" if not salas_filtro else ", ".join(salas_filtro)
     story.append(Paragraph(f"Filtro de salas: {_xml_escape(filtro_txt)}", small))
     story.append(Paragraph(f"Generado: {now_madrid().strftime('%d/%m/%Y %H:%M')}", small))
-    story.append(Spacer(1, 6))
+    story.append(Spacer(1, 3))
 
     if not rows:
         story.append(
@@ -455,19 +465,19 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
                 label,
             )
         )
-        story.append(Spacer(1, 4))
+        story.append(Spacer(1, 2))
 
-        story.append(Paragraph("<b>Reparación realizada por el trabajador (si aplica):</b>", label))
+        story.append(Paragraph("<b>Reparación (si aplica):</b>", label))
         story.append(Paragraph(_to_paragraph_text_multiline(reparacion), block))
 
         story.append(Paragraph("<b>Observaciones del encargado:</b>", label))
         story.append(Paragraph(_to_paragraph_text_multiline(observaciones), block))
 
-        story.append(Paragraph("<b>Descripción del parte:</b>", label))
+        story.append(Paragraph("<b>Descripción:</b>", label))
         story.append(Paragraph(_to_paragraph_text_multiline(descripcion), block))
 
         story.append(HRFlowable(thickness=0.6, width="100%"))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 4))
 
     doc.build(story)
     return out_path
@@ -614,9 +624,9 @@ def render_ticket_blocks(
             <div class="pill">Visto: {h(visto)}</div>
             <div class="pill">Estado: <span class="{pc}">{h(estado)}</span></div>
             <div class="hr"></div>
-            <p><b>Reparación realizada por el trabajador (si aplica):</b><br/>{h(rep_txt).replace(chr(10), "<br/>")}</p>
+            <p><b>Reparación (si aplica):</b><br/>{h(rep_txt).replace(chr(10), "<br/>")}</p>
             <p><b>Observaciones del encargado:</b><br/>{h(obs).replace(chr(10), "<br/>")}</p>
-            <p><b>Descripción del parte:</b><br/>{h(desc).replace(chr(10), "<br/>")}</p>
+            <p><b>Descripción:</b><br/>{h(desc).replace(chr(10), "<br/>")}</p>
           </div>
         '''
         )
@@ -668,10 +678,10 @@ def login_page(request: Request):
     body = '''
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-      <p class="muted"><i>Versión 1.3 Enero 2026</i></p>
+      <p class="muted"><i>Versión 1.4 Enero 2026</i></p>
       <form method="post" action="/login">
         <label>Código personal</label>
-        <input name="codigo" placeholder="Ej: I001A" autocomplete="off"/>
+        <input name="codigo" placeholder="Ej: A123B" autocomplete="off"/>
         <div style="margin-top:12px">
           <button class="btn" type="submit">Entrar</button>
         </div>
@@ -878,8 +888,147 @@ def worker_new_submit(
         (ref, u["codigo"], u["nombre"], room_id, sala_name, prio, tipo_name, desc, sol, rep),
     )
 
-    return RedirectResponse(f"/parte/{ref}", status_code=303)
+@app.get("/encargado/nuevo", response_class=HTMLResponse)
+def admin_new_form(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
+    salas = get_salas()
+    tipos = TIPOS_ANOMALIA
+
+    sala_opts = "\n".join([f"<option value='{h(s['id'])}'>{h(s['name'])}</option>" for s in salas])
+    tipo_opts = "\n".join([f"<option value='{h(t)}'>{h(t)}</option>" for t in tipos])
+    prio_opts = "\n".join([f"<option value='{h(code)}'>{h(label)}</option>" for (code, label, _cls) in PRIORIDADES])
+
+    ref = generar_referencia_alfa6()
+
+    body = f'''
+    <div class="top">
+      <div><h2>Crear nuevo parte</h2></div>
+      <div><a class="btn2" href="/encargado/gestion_partes">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <label>Referencia del parte</label>
+      <input value="{h(ref)}" readonly/>
+      <p class="muted">Anota esta referencia para poder consultar en un futuro tu parte de mantenimiento.</p>
+
+      <form method="post" action="/encargado/nuevo">
+        <input type="hidden" name="referencia" value="{h(ref)}"/>
+
+        <label>Sala de Escape donde se detecta la anomalía</label>
+        <select name="sala" required>
+          {sala_opts}
+        </select>
+
+        <label>Tipo de anomalía</label>
+        <select name="tipo" required>
+          {tipo_opts}
+        </select>
+
+        <label>Nivel de prioridad</label>
+        <select name="prioridad" required>
+          {prio_opts}
+        </select>
+
+        <label>Descripción de la anomalía</label>
+        <textarea name="descripcion" rows="7" placeholder="Describe en detalle la anomalía..." required></textarea>
+
+        <label style="margin-top:10px">¿Has podido solucionar tú el problema?</label>
+        <select name="solucionado" id="solucionado" onchange="toggleReparacion()" required>
+          <option value="NO">NO</option>
+          <option value="SI">SI</option>
+        </select>
+
+        <div id="reparacion_box" style="display:none; margin-top:10px">
+          <label>¿Qué solución o reparación has hecho?</label>
+          <textarea name="reparacion_usuario" rows="4" placeholder="Describe la reparación realizada..."></textarea>
+        </div>
+
+        <div style="margin-top:14px">
+          <button class="btn" type="submit">Guardar parte</button>
+        </div>
+      </form>
+    </div>
+
+    <script>
+      function toggleReparacion() {{
+        var v = document.getElementById('solucionado').value;
+        document.getElementById('reparacion_box').style.display = (v === 'SI') ? 'block' : 'none';
+      }}
+      toggleReparacion();
+    </script>
+    '''
+    return page("Nuevo parte (Encargado)", body)
+
+
+@app.post("/encargado/nuevo")
+def admin_new_submit(
+    request: Request,
+    referencia: str = Form(...),
+    sala: str = Form(...),
+    tipo: str = Form(...),
+    prioridad: str = Form("MEDIO"),
+    descripcion: str = Form(""),
+    solucionado: str = Form("NO"),
+    reparacion_usuario: str = Form(""),
+):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    ref = (referencia or "").strip().upper()
+    salas = get_salas()
+    room_id = int(sala)
+    sala_name = next((s["name"] for s in salas if int(s["id"]) == room_id), "")
+
+    tipo_name = (tipo or "").strip()
+    prio = (prioridad or "MEDIO").strip().upper()
+    if prio not in {p[0] for p in PRIORIDADES}:
+        prio = "MEDIO"
+
+    desc = (descripcion or "").strip()
+    sol = (solucionado or "NO").strip().upper()
+    if sol not in ("SI", "NO"):
+        sol = "NO"
+
+    rep = (reparacion_usuario or "").strip()
+    if sol != "SI":
+        rep = ""
+
+    db_exec(
+        '''
+        insert into public.wom_tickets(
+          referencia,
+          created_at,
+          created_by_code,
+          created_by_name,
+          room_id,
+          room_name,
+          priority,
+          tipo,
+          descripcion,
+          solucionado_por_usuario,
+          reparacion_usuario,
+          visto_por_encargado,
+          estado_encargado,
+          observaciones_encargado
+        ) values (
+          %s, now(), %s, %s, %s, %s, %s, %s, %s, %s, %s, false, 'SIN ESTADO', ''
+        )
+        on conflict (referencia) do nothing;
+    ''',
+        (ref, u["codigo"], u["nombre"], room_id, sala_name, prio, tipo_name, desc, sol, rep),
+    )
+
+    return RedirectResponse(f"/parte/{ref}", status_code=303)
 
 def _estado_cell(estado: str, prio: Any) -> str:
     cls = prio_class(prio)
@@ -1080,13 +1229,58 @@ def jefe_finalizados(request: Request):
     if u["rol"] != "JEFE":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
+    now = now_madrid()
+    body = f'''
+    <div class="top">
+      <div><h2>Finalizados</h2></div>
+      <div><a class="btn2" href="/jefe">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <h3>Filtrar por mes y año</h3>
+      <form method="post" action="/jefe/finalizados">
+        <label>Mes</label>
+        <select name="mes">
+          {''.join([f"<option value='{m}' {'selected' if m==now.month else ''}>{m:02d}</option>" for m in range(1,13)])}
+        </select>
+        <label>Año</label>
+        <input name="anio" type="number" value="{now.year}" min="2020" max="2100" required/>
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Ver finalizados</button>
+        </div>
+      </form>
+    </div>
+    '''
+    return page("Finalizados", body)
+
+
+@app.post("/jefe/finalizados", response_class=HTMLResponse)
+def jefe_finalizados_post(request: Request, mes: int = Form(...), anio: int = Form(...)):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "JEFE":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    mval = int(mes)
+    yval = int(anio)
+    if mval < 1 or mval > 12:
+        mval = now_madrid().month
+    if yval < 2000 or yval > 2100:
+        yval = now_madrid().year
+
+    start, end = month_bounds(yval, mval)
+
     rows = db_all(
         '''
         select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+          and created_at >= %s and created_at < %s
         order by created_at desc;
-    '''
+    ''',
+        (start, end),
     )
 
     trs = ""
@@ -1109,17 +1303,34 @@ def jefe_finalizados(request: Request):
 
     body = f'''
     <div class="top">
-      <div><h2>Partes finalizados</h2></div>
+      <div><h2>Finalizados</h2></div>
       <div><a class="btn2" href="/jefe">Volver</a></div>
     </div>
+
     <div class="card">
+      <h3>Filtrar por mes y año</h3>
+      <form method="post" action="/jefe/finalizados">
+        <label>Mes</label>
+        <select name="mes">
+          {''.join([f"<option value='{m}' {'selected' if m==mval else ''}>{m:02d}</option>" for m in range(1,13)])}
+        </select>
+        <label>Año</label>
+        <input name="anio" type="number" value="{yval}" min="2020" max="2100" required/>
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Ver finalizados</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <p class="muted">Mostrando finalizados de <b>{mval:02d}/{yval}</b></p>
       <table>
         <thead><tr><th>Ref</th><th>Fecha</th><th>Autor</th><th>Sala</th><th>Tipo</th><th>Estado</th><th>Visto</th></tr></thead>
         <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
     '''
-    return page("Jefe - Finalizados", body)
+    return page("Finalizados", body)
 
 
 @app.get("/jefe/consulta_en_proceso", response_class=HTMLResponse)
@@ -1278,6 +1489,17 @@ def parte_detalle(request: Request, ref: str):
             </div>
           </form>
 
+          
+<form method="post" action="/encargado/set_prioridad/{h((p.get("referencia") or "").strip())}" style="margin-top:12px">
+  <label>Cambiar nivel de prioridad</label>
+  <select name="prioridad">
+    {"".join([f"<option value='{h(code)}' {'selected' if str((p.get('priority') or 'MEDIO')).strip().upper()==code else ''}>{h(label)}</option>" for (code, label, _cls) in PRIORIDADES])}
+  </select>
+  <div style="margin-top:10px">
+    <button class="btn" type="submit">Guardar prioridad</button>
+  </div>
+</form>
+
           <form method="post" action="/encargado/set_obs/{h((p.get("referencia") or "").strip())}" style="margin-top:12px">
             <label>Observaciones del encargado (editable)</label>
             <textarea name="obs">{h(p.get("observaciones_encargado",""))}</textarea>
@@ -1399,13 +1621,58 @@ def admin_finalizados(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
+    now = now_madrid()
+    body = f'''
+    <div class="top">
+      <div><h2>Finalizados</h2></div>
+      <div><a class="btn2" href="/encargado">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <h3>Filtrar por mes y año</h3>
+      <form method="post" action="/encargado/finalizados">
+        <label>Mes</label>
+        <select name="mes">
+          {''.join([f"<option value='{m}' {'selected' if m==now.month else ''}>{m:02d}</option>" for m in range(1,13)])}
+        </select>
+        <label>Año</label>
+        <input name="anio" type="number" value="{now.year}" min="2020" max="2100" required/>
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Ver finalizados</button>
+        </div>
+      </form>
+    </div>
+    '''
+    return page("Finalizados", body)
+
+
+@app.post("/encargado/finalizados", response_class=HTMLResponse)
+def admin_finalizados_post(request: Request, mes: int = Form(...), anio: int = Form(...)):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    mval = int(mes)
+    yval = int(anio)
+    if mval < 1 or mval > 12:
+        mval = now_madrid().month
+    if yval < 2000 or yval > 2100:
+        yval = now_madrid().year
+
+    start, end = month_bounds(yval, mval)
+
     rows = db_all(
         '''
         select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+          and created_at >= %s and created_at < %s
         order by created_at desc;
-    '''
+    ''',
+        (start, end),
     )
 
     trs = ""
@@ -1431,7 +1698,24 @@ def admin_finalizados(request: Request):
       <div><h2>Finalizados</h2></div>
       <div><a class="btn2" href="/encargado">Volver</a></div>
     </div>
+
     <div class="card">
+      <h3>Filtrar por mes y año</h3>
+      <form method="post" action="/encargado/finalizados">
+        <label>Mes</label>
+        <select name="mes">
+          {''.join([f"<option value='{m}' {'selected' if m==mval else ''}>{m:02d}</option>" for m in range(1,13)])}
+        </select>
+        <label>Año</label>
+        <input name="anio" type="number" value="{yval}" min="2020" max="2100" required/>
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Ver finalizados</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <p class="muted">Mostrando finalizados de <b>{mval:02d}/{yval}</b></p>
       <table>
         <thead><tr><th>Ref</th><th>Fecha</th><th>Autor</th><th>Sala</th><th>Tipo</th><th>Estado</th><th>Visto</th></tr></thead>
         <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
@@ -1469,6 +1753,22 @@ def admin_set_estado(request: Request, ref: str, estado: str = Form(...)):
     return RedirectResponse(f"/parte/{ref}", status_code=303)
 
 
+@app.post("/encargado/set_prioridad/{ref}")
+def admin_set_prioridad(request: Request, ref: str, prioridad: str = Form(...)):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    pr = (prioridad or "").strip().upper()
+    if pr not in {p[0] for p in PRIORIDADES}:
+        pr = "MEDIO"
+    update_ticket(ref, "priority=%s", (pr,))
+    return RedirectResponse(f"/parte/{ref}", status_code=303)
+
+
 @app.post("/encargado/set_obs/{ref}")
 def admin_set_obs(request: Request, ref: str, obs: str = Form("")):
     r = require_login(request)
@@ -1502,6 +1802,7 @@ def admin_gestion_partes(request: Request):
 
     <div class="card">
       <div class="row">
+        <a class="btn" href="/encargado/nuevo">Crear Nuevo Parte</a>
         <a class="btn" href="/encargado/pdf">Generar PDF de partes en proceso</a>
         <a class="btn" href="/encargado/visualizar_en_proceso">Visualizar partes en Proceso</a>
         <a class="btn danger" href="/encargado/eliminar_partes">Eliminar partes del sistema</a>
