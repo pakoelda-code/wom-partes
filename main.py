@@ -40,6 +40,7 @@ PRIORIDADES = [
     ("MEDIO", "Medio", "#d97706"),
     ("DEMORABLE", "Demorable", "#15803d"),
 ]
+PRIORIDAD_COLOR = {k: color for (k, _label, color) in PRIORIDADES}
 PRIORIDADES_VALIDAS = {p[0] for p in PRIORIDADES}
 
 def prio_label(prio: str) -> str:
@@ -435,7 +436,7 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
         prio = (p.get("priority") or "MEDIO").upper()
         prio_opts_sel = "\n".join([
             f"<option value='{h(k)}'" + (" selected" if k == prio else "") + f">{h(v)}</option>"
-            for k, v in PRIORIDADES
+            for k, v, _ in PRIORIDADES
         ])
         autor = p.get("created_by_name") or ""
 
@@ -1310,6 +1311,16 @@ def parte_detalle(request: Request, ref: str):
     visto = "Sí" if p.get("visto_por_encargado") else "No"
     estado = p.get("estado_encargado") or "SIN ESTADO"
     prio = p.get("priority") or "MEDIO"
+    # Selector/visualización de prioridad (solo editable por ENCARGADO)
+    prio_color = PRIORIDAD_COLOR.get(prio, "#f39c12")
+    if u.get("role") == "encargado":
+        prio_opts = "\n".join([
+            f"<option value='{h(k)}'" + (" selected" if k == prio else "") + f">{h(v)}</option>"
+            for k, v, _ in PRIORIDADES
+        ])
+        prio_opts_sel = f"<select name='priority' class='inp'>{prio_opts}</select>"
+    else:
+        prio_opts_sel = f"<b style='color:{prio_color}'>{h(prio)}</b>"
     sol = bool(p.get("solucionado_por_usuario", False))
     rep = (p.get("reparacion_usuario") or "").strip()
     obs = (p.get("observaciones_encargado") or "").strip()
