@@ -32,6 +32,34 @@ TZ = ZoneInfo("Europe/Madrid")
 
 TIPOS = ["ELECTRÓNICA", "MOBILIARIO", "ESTRUCTURA", "ELEMENTOS SUELTOS", "OTROS/AS"]
 
+
+
+# ------------ Prioridades ------------
+PRIORIDADES = [
+    ("URGENTE", "Urgente", "#b00000"),
+    ("MEDIO", "Medio", "#d97706"),
+    ("DEMORABLE", "Demorable", "#15803d"),
+]
+PRIORIDADES_VALIDAS = {p[0] for p in PRIORIDADES}
+
+def prio_label(prio: str) -> str:
+    p = (prio or "").strip().upper()
+    if p == "URGENTE":
+        return "Urgente"
+    if p == "DEMORABLE":
+        return "Demorable"
+    return "Medio"
+
+def prio_css_class(prio: str) -> str:
+    p = (prio or "").strip().upper()
+    if p == "URGENTE":
+        return "prio-urg"
+    if p == "DEMORABLE":
+        return "prio-dem"
+    return "prio-med"
+
+def prio_span(prio: str, txt: str) -> str:
+    return f"<span class='{prio_css_class(prio)}'>{h(txt or '')}</span>"
 ESTADOS_ENCARGADO = [
     "SIN ESTADO",
     "TRABAJO PENDIENTE/EN COLA",
@@ -141,6 +169,10 @@ def ensure_schema_and_seed() -> None:
     """
     )
 
+    
+    # Migración suave (si la tabla ya existía)
+    db_exec("alter table public.wom_tickets add column if not exists priority text not null default 'MEDIO';")
+    db_exec("create index if not exists wom_tickets_priority_idx on public.wom_tickets(priority);")
     db_exec(
         "create index if not exists wom_tickets_created_at_idx on public.wom_tickets(created_at desc);"
     )
@@ -192,6 +224,19 @@ def ensure_schema_and_seed() -> None:
 # =========================
 def now_madrid() -> datetime:
     return datetime.now(TZ)
+
+
+def month_bounds(year: int, month: int):
+    """Devuelve (inicio, fin) del mes en zona Europe/Madrid (tz-aware)."""
+    y = int(year); m_ = int(month)
+    if m_ < 1 or m_ > 12:
+        raise ValueError("Mes inválido")
+    start = datetime(y, m_, 1, 0, 0, 0, tzinfo=TZ)
+    if m_ == 12:
+        end = datetime(y + 1, 1, 1, 0, 0, 0, tzinfo=TZ)
+    else:
+        end = datetime(y, m_ + 1, 1, 0, 0, 0, tzinfo=TZ)
+    return start, end
 
 
 def formatear_fecha_hora(dt_value) -> Tuple[str, str]:
@@ -358,7 +403,7 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
     st_title = ParagraphStyle("title_small", parent=styles["Heading2"], fontSize=12, leading=14, spaceAfter=6)
     st_line = ParagraphStyle("line", parent=styles["Normal"], fontSize=8, leading=9, spaceAfter=1)
     st_label = ParagraphStyle("label", parent=styles["Normal"], fontSize=8, leading=9, spaceBefore=1, spaceAfter=0)
-    st_mono = ParagraphStyle("mono", parent=styles["Normal"], fontName="Courier", fontSize=7.5, leading=9, spaceAfter=1)
+    st_mono = ParagraphStyle("mono", parent=styles["Normal"], fontName="Courier", fontSize=8.5, leading=10, spaceAfter=1)
 
     def e(s: str) -> str:
         return _xml_escape(s or "").replace("\n", "<br/>")
@@ -495,6 +540,9 @@ def page(title: str, body: str) -> str:
     .ticket h3{{margin:0 0 6px 0}}
     .hr{{border-top:1px solid #eee; margin:10px 0}}
 .btn-attn{{font-weight:700; color:#8a0041; border-color:#8a0041; background:#ffe4f0}}
+  .prio-urg{{color:#b00000;font-weight:800;}}
+  .prio-med{{color:#d97706;font-weight:800;}}
+  .prio-dem{{color:#15803d;font-weight:800;}}
   </style>
 </head>
 <body>
@@ -766,7 +814,15 @@ def worker_new_form(request: Request):
         <label>Tipo</label>
         <select name="tipo">{tipos_opts}</select>
 
-        <label>Descripción</label>
+        
+        <label>Nivel de prioridad</label>
+        <select name="priority" required>
+          <option value="URGENTE" style="color:#b00000;font-weight:800;">Urgente</option>
+          <option value="MEDIO" selected style="color:#d97706;font-weight:800;">Medio</option>
+          <option value="DEMORABLE" style="color:#15803d;font-weight:800;">Demorable</option>
+        </select>
+
+<label>Descripción</label>
         <textarea name="descripcion" placeholder="Describe en detalle..."></textarea>
 
         <label>¿Has podido solucionar tú el problema?</label>
@@ -812,6 +868,7 @@ def worker_new_submit(
     referencia: str = Form(...),
     sala: str = Form(...),
     tipo: str = Form(...),
+    priority: str = Form('MEDIO'),
     descripcion: str = Form(""),
     solucionado: str = Form("NO"),
     reparacion_usuario: str = Form(""),
@@ -860,7 +917,7 @@ def worker_activos(request: Request):
 
     rows = db_all(
         """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
+        select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
@@ -879,7 +936,7 @@ def worker_activos(request: Request):
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{prio_span(p.get("priority"), p.get("estado_encargado","SIN ESTADO"))}</td>
           <td>{h(visto)}</td>
         </tr>
         """
@@ -1040,7 +1097,7 @@ def jefe_en_proceso(request: Request):
 
     rows = db_all(
         """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
+        select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
@@ -1059,7 +1116,7 @@ def jefe_en_proceso(request: Request):
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{prio_span(p.get("priority"), p.get("estado_encargado","SIN ESTADO"))}</td>
           <td>{h(visto)}</td>
         </tr>
         """
@@ -1088,19 +1145,31 @@ def jefe_finalizados(request: Request):
     if u["rol"] != "JEFE":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    rows = db_all(
-        """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
-        from public.wom_tickets
-        where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
-        order by created_at desc;
-    """
-    )
+    now = now_madrid()
+    mes = (request.query_params.get("mes") or str(now.month)).strip()
+    anio = (request.query_params.get("anio") or str(now.year)).strip()
+
+    rows = []
+    error = ""
+    try:
+        mes_i = int(mes); anio_i = int(anio)
+        ts_start, ts_end = month_bounds(anio_i, mes_i)
+        rows = db_all(
+            """
+            select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado
+            from public.wom_tickets
+            where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+              and created_at >= %s and created_at < %s
+            order by created_at desc;
+            """,
+            (ts_start, ts_end),
+        )
+    except Exception as e:
+        error = str(e)
 
     trs = ""
     for p in rows:
         f, hh = formatear_fecha_hora(p.get("created_at"))
-        visto = "Sí" if p.get("visto_por_encargado") else "No"
         ref = (p.get("referencia") or "").strip()
         trs += f"""
         <tr>
@@ -1109,24 +1178,41 @@ def jefe_finalizados(request: Request):
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
-          <td>{h(visto)}</td>
+          <td>{prio_span(p.get("priority"), p.get("estado_encargado","SIN ESTADO"))}</td>
         </tr>
         """
 
     body = f"""
     <div class="top">
-      <div><h2>Partes finalizados</h2></div>
+      <div><h2>Ver listado de partes finalizados</h2></div>
       <div><a class="btn2" href="/jefe">Volver</a></div>
     </div>
+
+    <div class="card">
+      <form method="get" action="/jefe/finalizados">
+        <div class="grid2">
+          <div>
+            <label>Mes</label>
+            <input name="mes" type="number" min="1" max="12" value="{h(mes)}" required>
+          </div>
+          <div>
+            <label>Año</label>
+            <input name="anio" type="number" min="2000" max="2100" value="{h(anio)}" required>
+          </div>
+        </div>
+        <button class="btn" type="submit">Filtrar</button>
+      </form>
+      {f"<p class='warn'>Error en filtro: {h(error)}</p>" if error else ""}
+    </div>
+
     <div class="card">
       <table>
-        <thead><tr><th>Ref</th><th>Fecha</th><th>Autor</th><th>Sala</th><th>Tipo</th><th>Estado</th><th>Visto</th></tr></thead>
-        <tbody>{trs or "<tr><td colspan='7'>No hay partes.</td></tr>"}</tbody>
+        <thead><tr><th>Ref</th><th>Fecha</th><th>Autor</th><th>Sala</th><th>Tipo</th><th>Estado</th></tr></thead>
+        <tbody>{trs or "<tr><td colspan='6'>No hay partes.</td></tr>"}</tbody>
       </table>
     </div>
     """
-    return page("Jefe - Finalizados", body)
+    return page("Finalizados", body)
 
 
 @app.get("/jefe/consulta_en_proceso", response_class=HTMLResponse)
@@ -1347,7 +1433,7 @@ def admin_pendientes(request: Request):
 
     rows = db_all(
         """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
+        select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
         where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
         order by created_at desc;
@@ -1366,7 +1452,7 @@ def admin_pendientes(request: Request):
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{prio_span(p.get("priority"), p.get("estado_encargado","SIN ESTADO"))}</td>
           <td>{h(visto)}</td>
         </tr>
         """
@@ -1395,14 +1481,27 @@ def admin_finalizados(request: Request):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    rows = db_all(
-        """
-        select referencia, created_at, created_by_name, room_name, tipo, estado_encargado, visto_por_encargado
-        from public.wom_tickets
-        where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
-        order by created_at desc;
-    """
-    )
+    now = now_madrid()
+    mes = (request.query_params.get("mes") or str(now.month)).strip()
+    anio = (request.query_params.get("anio") or str(now.year)).strip()
+
+    rows = []
+    error = ""
+    try:
+        mes_i = int(mes); anio_i = int(anio)
+        ts_start, ts_end = month_bounds(anio_i, mes_i)
+        rows = db_all(
+            """
+            select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
+            from public.wom_tickets
+            where estado_encargado in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+              and created_at >= %s and created_at < %s
+            order by created_at desc;
+            """,
+            (ts_start, ts_end),
+        )
+    except Exception as e:
+        error = str(e)
 
     trs = ""
     for p in rows:
@@ -1416,7 +1515,7 @@ def admin_finalizados(request: Request):
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{prio_span(p.get("priority"), p.get("estado_encargado","SIN ESTADO"))}</td>
           <td>{h(visto)}</td>
         </tr>
         """
@@ -1426,6 +1525,24 @@ def admin_finalizados(request: Request):
       <div><h2>Finalizados</h2></div>
       <div><a class="btn2" href="/encargado">Volver</a></div>
     </div>
+
+    <div class="card">
+      <form method="get" action="/encargado/finalizados">
+        <div class="grid2">
+          <div>
+            <label>Mes</label>
+            <input name="mes" type="number" min="1" max="12" value="{h(mes)}" required>
+          </div>
+          <div>
+            <label>Año</label>
+            <input name="anio" type="number" min="2000" max="2100" value="{h(anio)}" required>
+          </div>
+        </div>
+        <button class="btn" type="submit">Filtrar</button>
+      </form>
+      {f"<p class='warn'>Error en filtro: {h(error)}</p>" if error else ""}
+    </div>
+
     <div class="card">
       <table>
         <thead><tr><th>Ref</th><th>Fecha</th><th>Autor</th><th>Sala</th><th>Tipo</th><th>Estado</th><th>Visto</th></tr></thead>
@@ -1463,6 +1580,23 @@ def admin_set_estado(request: Request, ref: str, estado: str = Form(...)):
         update_ticket(ref, "estado_encargado=%s, visto_por_encargado=true", (est,))
     return RedirectResponse(f"/parte/{ref}", status_code=303)
 
+
+
+@app.post("/encargado/set_priority/{ref}")
+def admin_set_priority(request: Request, ref: str, priority: str = Form("MEDIO")):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    pr = (priority or "MEDIO").strip().upper()
+    if pr not in PRIORIDADES_VALIDAS:
+        pr = "MEDIO"
+
+    db_exec("update public.wom_tickets set priority=%s where referencia=%s;", (pr, ref))
+    return RedirectResponse(f"/parte/{ref}", status_code=303)
 
 @app.post("/encargado/set_obs/{ref}")
 def admin_set_obs(request: Request, ref: str, obs: str = Form("")):
@@ -1674,7 +1808,7 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
           <td>{h(f)} {h(hh)}</td>
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
-          <td>{h(p.get("estado_encargado","SIN ESTADO"))}</td>
+          <td>{prio_span(p.get("priority"), p.get("estado_encargado","SIN ESTADO"))}</td>
           <td><a class="btn danger" href="/encargado/eliminar_partes/confirmar/{h(ref)}">Eliminar</a></td>
         </tr>
         """
