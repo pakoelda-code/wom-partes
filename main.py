@@ -288,6 +288,10 @@ def generar_referencia() -> str:
         if not exists:
             return ref
 
+def generar_referencia_alfa6() -> str:
+    """Alias retrocompatible: algunas rutas antiguas llamaban a esta función."""
+    return generar_referencia()
+
 
 def ticket_por_ref(ref: str) -> Optional[Dict[str, Any]]:
     r = (ref or "").strip().upper()
@@ -888,6 +892,9 @@ def worker_new_submit(
         (ref, u["codigo"], u["nombre"], room_id, sala_name, prio, tipo_name, desc, sol, rep),
     )
 
+    return RedirectResponse(f"/parte/{ref}", status_code=303)
+
+
 @app.get("/encargado/nuevo", response_class=HTMLResponse)
 def admin_new_form(request: Request):
     r = require_login(request)
@@ -904,7 +911,7 @@ def admin_new_form(request: Request):
     tipo_opts = "\n".join([f"<option value='{h(t)}'>{h(t)}</option>" for t in tipos])
     prio_opts = "\n".join([f"<option value='{h(code)}'>{h(label)}</option>" for (code, label, _cls) in PRIORIDADES])
 
-    ref = generar_referencia_alfa6()
+    ref = generar_referencia()
 
     body = f'''
     <div class="top">
@@ -985,9 +992,9 @@ def admin_new_submit(
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     ref = (referencia or "").strip().upper()
-    salas = get_salas()
-    room_id = int(sala)
-    sala_name = next((s["name"] for s in salas if int(s["id"]) == room_id), "")
+    sala_name = (sala or "").strip()
+    room = db_one("select id, name from public.wom_rooms where name=%s;", (sala_name,))
+    room_id = int(room["id"]) if room else None
 
     tipo_name = (tipo or "").strip()
     prio = (prioridad or "MEDIO").strip().upper()
