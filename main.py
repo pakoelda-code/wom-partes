@@ -32,6 +32,9 @@ TZ = ZoneInfo("Europe/Madrid")
 
 TIPOS = ["ELECTRÓNICA", "MOBILIARIO", "ESTRUCTURA", "ELEMENTOS SUELTOS", "OTROS/AS"]
 
+
+# Alias de compatibilidad (versiones anteriores)
+TIPOS_ANOMALIA = TIPOS
 PRIORIDADES = [
     ("URGENTE", "Urgente", "prio-urgente"),
     ("MEDIO", "Medio", "prio-medio"),
