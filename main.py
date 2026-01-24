@@ -78,6 +78,17 @@ ALL_MARKER = "__TODAS__"  # valor especial en multiselect
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 
+
+def prio_badge(prio: str) -> str:
+    """Devuelve un span coloreado para el texto de prioridad."""
+    p = (prio or "MEDIO").strip().upper()
+    if p == "URGENTE":
+        return "<span style='font-weight:800;color:#d00;'>Urgente</span>"
+    if p == "DEMORABLE":
+        return "<span style='font-weight:700;color:#1b7a1b;'>Demorable</span>"
+    return "<span style='font-weight:700;color:#d57a00;'>Medio</span>"
+
+
 def _ensure_db_url() -> str:
     if not DATABASE_URL:
         raise RuntimeError("Falta DATABASE_URL en variables de entorno")
@@ -883,6 +894,9 @@ def worker_new_submit(
     ref = (referencia or "").strip().upper()
     sala_name = (sala or "").strip()
     tipo_name = (tipo or "").strip()
+    prio = (priority or "MEDIO").strip().upper()
+    if prio not in ("URGENTE", "MEDIO", "DEMORABLE"):
+        prio = "MEDIO"
     desc = (descripcion or "").strip() or "(Sin descripción)"
 
     sol = (solucionado or "").strip().upper() == "SI"
@@ -894,13 +908,13 @@ def worker_new_submit(
     db_exec(
         """
         insert into public.wom_tickets
-        (referencia, created_by_code, created_by_name, room_id, room_name, tipo, descripcion,
+        (referencia, created_by_code, created_by_name, room_id, room_name, tipo, priority, descripcion,
          solucionado_por_usuario, reparacion_usuario, visto_por_encargado, estado_encargado, observaciones_encargado)
         values
         (%s, %s, %s, %s, %s, %s, %s, %s, %s, false, 'SIN ESTADO', '')
         on conflict (referencia) do nothing;
     """,
-        (ref, u["codigo"], u["nombre"], room_id, sala_name, tipo_name, desc, sol, rep),
+        (ref, u["codigo"], u["nombre"], room_id, sala_name, tipo_name, prio, desc, sol, rep),
     )
 
     return RedirectResponse(f"/parte/{ref}", status_code=303)
@@ -1033,7 +1047,7 @@ def worker_finalizados_post(request: Request, mes: int = Form(...), anio: int = 
           <td>{h(p.get("created_by_name",""))}</td>
           <td>{h(p.get("room_name",""))}</td>
           <td>{h(p.get("tipo",""))}</td>
-          {_estado_cell(estado, prio)}
+          <td>{prio_span(prio, estado)}</td>
           <td>{h(visto)}</td>
         </tr>
         '''
@@ -1291,6 +1305,7 @@ def parte_detalle(request: Request, ref: str):
     fecha, hora = formatear_fecha_hora(p.get("created_at"))
     visto = "Sí" if p.get("visto_por_encargado") else "No"
     estado = p.get("estado_encargado") or "SIN ESTADO"
+    prio = p.get("priority") or "MEDIO"
     sol = bool(p.get("solucionado_por_usuario", False))
     rep = (p.get("reparacion_usuario") or "").strip()
     obs = (p.get("observaciones_encargado") or "").strip()
@@ -1320,7 +1335,8 @@ def parte_detalle(request: Request, ref: str):
         <h2>Parte {h((p.get("referencia") or "").strip())}</h2>
         <div class="pill">Fecha: {h(fecha)} {h(hora)}</div>
         <div class="pill">Visto: {h(visto)}</div>
-        <div class="pill">Estado: {h(estado)}</div>
+        <div class="pill">Estado: {prio_span(prio, estado)}</div>
+        <div class="pill">Prioridad: {prio_badge(prio)}</div>
       </div>
       <div><a class="btn2" href="{h(back)}">Volver</a></div>
     </div>
@@ -1400,6 +1416,10 @@ def admin_menu(request: Request):
     unseen = int((row or {}).get("n") or 0)
     pend_class = "btn btn-attn" if unseen > 0 else "btn"
 
+    
+    urgente_banner = ""
+    if urgentes_sin_ver > 0:
+        urgente_banner = f"<div style='margin-top:10px;font-weight:800;color:#d00;'>¡TIENES {urgentes_sin_ver} PARTE/S URGENTE/S!</div>"
     body = f'''
     <div class="top">
       <div>
