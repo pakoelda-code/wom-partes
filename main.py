@@ -426,7 +426,7 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
     story = []
     story.append(Paragraph("Relación de Partes en Proceso", st_title))
     story.append(Paragraph(f"Salas: <b>{e(filtro_txt)}</b> — Generado: {now_madrid().strftime('%d/%m/%Y %H:%M')}", st_line))
-    story.append(Spacer(1, 3))
+    story.append(Spacer(1, 14))
 
     azul_sala = "#003366"
 
@@ -472,9 +472,9 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
         story.append(Paragraph("<b>Comentario del Encargado:</b>", st_label))
         story.append(Paragraph(e(com) or "-", st_mono))
 
-        story.append(Spacer(1, 1))
-        story.append(HRFlowable(width="100%", thickness=0.3, color=colors.lightgrey))
-        story.append(Spacer(1, 2))
+        story.append(Spacer(1, 10))
+        story.append(HRFlowable(width="100%", thickness=1.2, color=colors.black))
+        story.append(Spacer(1, 10))
 
     doc.build(story)
     return out_path
