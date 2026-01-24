@@ -433,6 +433,10 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
         sala = p.get("room_name") or ""
         tipo = p.get("tipo") or ""
         prio = (p.get("priority") or "MEDIO").upper()
+        prio_opts_sel = "\n".join([
+            f"<option value='{h(k)}'" + (" selected" if k == prio else "") + f">{h(v)}</option>"
+            for k, v in PRIORIDADES
+        ])
         autor = p.get("created_by_name") or ""
 
         desc = p.get("descripcion") or ""
@@ -911,7 +915,7 @@ def worker_new_submit(
         (referencia, created_by_code, created_by_name, room_id, room_name, tipo, priority, descripcion,
          solucionado_por_usuario, reparacion_usuario, visto_por_encargado, estado_encargado, observaciones_encargado)
         values
-        (%s, %s, %s, %s, %s, %s, %s, %s, %s, false, 'SIN ESTADO', '')
+        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, 'SIN ESTADO', '')
         on conflict (referencia) do nothing;
     """,
         (ref, u["codigo"], u["nombre"], room_id, sala_name, tipo_name, prio, desc, sol, rep),
@@ -1372,6 +1376,14 @@ def parte_detalle(request: Request, ref: str):
             <button class="btn" type="submit">Marcar como leído/visto</button>
           </form>
 
+          <form method="post" action="/encargado/set_priority/{ref}" style="margin-top:12px">
+            <label class="small">Nivel de prioridad:</label>
+            <select name="priority" class="input">
+              {prio_opts_sel}
+            </select>
+            <button class="btn2" type="submit">Cambiar prioridad</button>
+          </form>
+
           <form method="post" action="/encargado/set_estado/{h((p.get("referencia") or "").strip())}" style="margin-top:12px">
             <label>Cambiar estado</label>
             <select name="estado">{estados_opts}</select>
@@ -1416,6 +1428,17 @@ def admin_menu(request: Request):
     unseen = int((row or {}).get("n") or 0)
     pend_class = "btn btn-attn" if unseen > 0 else "btn"
 
+    urg_row = db_one(
+        '''
+        select count(*)::int as n
+        from public.wom_tickets
+        where coalesce(estado_encargado,'') not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+          and visto_por_encargado = false
+          and upper(coalesce(priority,'')) = 'URGENTE';
+        '''
+    )
+    urgentes_sin_ver = int((urg_row or {}).get('n') or 0)
+
     
     urgente_banner = ""
     if urgentes_sin_ver > 0:
@@ -1437,6 +1460,7 @@ def admin_menu(request: Request):
         <a class="btn" href="/encargado/gestion_usuarios">Gestión de Usuarios</a>
       </div>
     </div>
+    {urgente_banner}
     '''
     return page("Encargado", body)
 
