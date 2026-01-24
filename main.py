@@ -353,6 +353,7 @@ def _query_partes_en_proceso_filtrado(
               created_by_name,
               room_name,
               tipo,
+              priority,
               descripcion,
               solucionado_por_usuario,
               reparacion_usuario,
@@ -374,6 +375,7 @@ def _query_partes_en_proceso_filtrado(
           created_by_name,
           room_name,
           tipo,
+          priority,
           descripcion,
           solucionado_por_usuario,
           reparacion_usuario,
@@ -453,7 +455,7 @@ def generar_pdf_partes_en_proceso(salas_filtro: Optional[List[str]]) -> Path:
         # Línea 2: Tipo / Prioridad / Usuario
         line2 = (
             f"<b>Tipo:</b> {e(tipo)}&nbsp;&nbsp;&nbsp;"
-            f"<b>Nivel de prioridad:</b> {e(prio)}&nbsp;&nbsp;&nbsp;"
+            f"<b>Nivel de prioridad:</b> {e(prio_label(prio))}&nbsp;&nbsp;&nbsp;"
             f"<b>Usuario:</b> {e(autor)}"
         )
 
@@ -1310,17 +1312,16 @@ def parte_detalle(request: Request, ref: str):
     fecha, hora = formatear_fecha_hora(p.get("created_at"))
     visto = "Sí" if p.get("visto_por_encargado") else "No"
     estado = p.get("estado_encargado") or "SIN ESTADO"
-    prio = p.get("priority") or "MEDIO"
-    # Selector/visualización de prioridad (solo editable por ENCARGADO)
-    prio_color = PRIORIDAD_COLOR.get(prio, "#f39c12")
-    if u.get("role") == "encargado":
-        prio_opts = "\n".join([
-            f"<option value='{h(k)}'" + (" selected" if k == prio else "") + f">{h(v)}</option>"
-            for k, v, _ in PRIORIDADES
-        ])
-        prio_opts_sel = f"<select name='priority' class='inp'>{prio_opts}</select>"
-    else:
-        prio_opts_sel = f"<b style='color:{prio_color}'>{h(prio)}</b>"
+    prio_current = (p.get("priority") or "MEDIO").upper()
+    prio = prio_current
+    prio_color = PRIORIDAD_COLOR.get(prio_current, "#f39c12")
+    prio_badge_html = f"<b style='color:{prio_color}'>{h(prio_label(prio_current))}</b>"
+    prio_options_html = "".join(
+    [
+    f"<option value='{h(k)}' {'selected' if k==prio_current else ''}>{h(v)}</option>"
+    for k, v, _c in PRIORIDADES
+    ]
+    )
     sol = bool(p.get("solucionado_por_usuario", False))
     rep = (p.get("reparacion_usuario") or "").strip()
     obs = (p.get("observaciones_encargado") or "").strip()
@@ -1351,7 +1352,7 @@ def parte_detalle(request: Request, ref: str):
         <div class="pill">Fecha: {h(fecha)} {h(hora)}</div>
         <div class="pill">Visto: {h(visto)}</div>
         <div class="pill">Estado: {prio_span(prio, estado)}</div>
-        <div class="pill">Prioridad: {prio_badge(prio)}</div>
+        <div class="pill">Prioridad: {prio_badge_html}</div>
       </div>
       <div><a class="btn2" href="{h(back)}">Volver</a></div>
     </div>
@@ -1390,7 +1391,7 @@ def parte_detalle(request: Request, ref: str):
           <form method="post" action="/encargado/set_priority/{ref}" style="margin-top:12px">
             <label class="small">Nivel de prioridad:</label>
             <select name="priority" class="input">
-              {prio_opts_sel}
+              {prio_options_html}
             </select>
             <button class="btn2" type="submit">Cambiar prioridad</button>
           </form>
