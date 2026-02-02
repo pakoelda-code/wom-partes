@@ -16,7 +16,9 @@
 import os
 import random
 import string
-from datetime import datetime
+import math
+from urllib.parse import quote
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -198,6 +200,27 @@ def ensure_schema_and_seed() -> None:
         "create index if not exists wom_tickets_room_idx on public.wom_tickets(room_name);"
     )
 
+
+    db_exec(
+        """
+    create table if not exists public.wom_hours (
+      id bigserial primary key,
+      user_code text references public.wom_users(code) on delete set null,
+      user_name text not null,
+      room_name text not null,
+      entry_at timestamptz,
+      exit_at timestamptz,
+      created_by_code text references public.wom_users(code) on delete set null,
+      is_manual boolean not null default false,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    """
+    )
+    db_exec("create index if not exists wom_hours_user_idx on public.wom_hours(user_code);")
+    db_exec("create index if not exists wom_hours_entry_idx on public.wom_hours(entry_at desc);")
+    db_exec("create index if not exists wom_hours_room_idx on public.wom_hours(room_name);")
+
     count_users = db_one("select count(*)::int as n from public.wom_users;")
     if count_users and count_users["n"] == 0:
         db_exec(
@@ -264,6 +287,49 @@ def formatear_fecha_hora(dt_value) -> Tuple[str, str]:
         return dt.strftime("%d/%m/%Y"), dt.strftime("%H:%M")
     except Exception:
         return "??/??/????", "??:??"
+
+
+
+def parse_fecha_hora_es(fecha: str, hora: str) -> datetime:
+    """Parsea fecha DD/MM/AAAA y hora HH:MM (24h) en TZ Europe/Madrid."""
+    f = (fecha or "").strip()
+    h_ = (hora or "").strip()
+    if not f or not h_:
+        raise ValueError("Fecha y hora obligatorias")
+    try:
+        dt_naive = datetime.strptime(f"{f} {h_}", "%d/%m/%Y %H:%M")
+    except Exception:
+        raise ValueError("Formato inválido. Usa DD/MM/AAAA y HH:MM (24h).")
+    return dt_naive.replace(tzinfo=TZ)
+
+
+def round_hours_to_half(hours: float) -> float:
+    """Redondea horas a múltiplos de 0,5 (half-up)."""
+    if hours is None:
+        return 0.0
+    if hours < 0:
+        return 0.0
+    return math.floor(hours * 2 + 0.5) / 2.0
+
+
+def fmt_hours_es(hours: float) -> str:
+    """Formatea horas en ES (0,5)."""
+    if hours is None:
+        return "-"
+    if abs(hours - int(hours)) < 1e-9:
+        return str(int(hours))
+    return f"{hours:.1f}".replace(".", ",")
+
+
+def get_workers_for_hours() -> List[Dict[str, str]]:
+    """Lista usuarios seleccionables para control de horas (TRABAJADOR y ENCARGADO)."""
+    rows = db_all(
+        "select code, name, role from public.wom_users where role in ('TRABAJADOR','ENCARGADO') order by role, name;"
+    )
+    out = []
+    for r in rows:
+        out.append({"code": (r.get("code") or "").strip(), "name": r.get("name") or "", "role": r.get("role") or ""})
+    return out
 
 
 def get_user_by_code(code: str) -> Optional[Dict[str, str]]:
@@ -1470,12 +1536,697 @@ def admin_menu(request: Request):
         <a class="btn" href="/encargado/finalizados">Ver finalizados</a>
         <a class="btn" href="/encargado/gestion_partes">Gestión de Partes</a>
         <a class="btn" href="/encargado/gestion_usuarios">Gestión de Usuarios</a>
+        <a class="btn" href="/encargado/horas">Control de Horas</a>
       </div>
     </div>
     {urgente_banner}
     '''
     return page("Encargado", body)
 
+
+
+
+# =========================
+# ENCARGADO - Control de Horas
+# =========================
+@app.get("/encargado/horas", response_class=HTMLResponse)
+def admin_horas_menu(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    body = f'''
+    <div class="top">
+      <div><h2>Control de Horas</h2></div>
+      <div><a class="btn2" href="/encargado">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <a class="btn" href="/encargado/horas/anadir">Añadir Entrada/Salida</a>
+        <a class="btn" href="/encargado/horas/consultar">Consultar Horas</a>
+        <a class="btn" href="/encargado/horas/pdf">Generar PDF de Horas</a>
+      </div>
+    </div>
+    '''
+    return page("Control de Horas", body)
+
+
+@app.get("/encargado/horas/anadir", response_class=HTMLResponse)
+def admin_horas_anadir(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    workers = get_workers_for_hours()
+    salas = get_salas()
+
+    sel_worker = (request.query_params.get("worker") or "").strip().upper()
+    sel_sala = (request.query_params.get("sala") or "").strip()
+
+    msg = (request.query_params.get("msg") or "").strip()
+    ok = (request.query_params.get("ok") or "").strip() == "1"
+
+    opts_workers = "<option value=''>-- Selecciona trabajador --</option>"
+    for w in workers:
+        code = (w.get("code") or "").strip().upper()
+        name = w.get("name") or ""
+        label = f"{name} ({code})"
+        sel = " selected" if code == sel_worker else ""
+        opts_workers += f"<option value='{h(code)}'{sel}>{h(label)}</option>"
+
+    opts_salas = "<option value=''>-- Selecciona sala --</option>"
+    for s in salas:
+        sel = " selected" if s == sel_sala else ""
+        opts_salas += f"<option value='{h(s)}'{sel}>{h(s)}</option>"
+
+    alert = ""
+    if msg:
+        color = "#0a6" if ok else "#c00"
+        alert = f"<div style='margin-top:10px;font-weight:700;color:{color};'>{h(msg)}</div>"
+
+    body = f'''
+    <div class="top">
+      <div><h2>Añadir Entrada / Salida</h2></div>
+      <div><a class="btn2" href="/encargado/horas">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <form method="post" action="/encargado/horas/registrar">
+        <label>Game Master / Trabajador</label>
+        <select name="worker_code">{opts_workers}</select>
+
+        <label>Sala</label>
+        <select name="sala">{opts_salas}</select>
+
+        <div style="margin-top:12px" class="row">
+          <button class="btn" type="submit" name="accion" value="entrada">Registrar Entrada (ahora)</button>
+          <button class="btn" type="submit" name="accion" value="salida">Registrar Salida (ahora)</button>
+        </div>
+
+        <div class="hr"></div>
+        <h3 style="margin:0 0 6px 0">Registro Manual</h3>
+        <p class="muted" style="margin-top:0">Puedes registrar una <b>entrada</b>, una <b>salida</b> o ambas. Formato: DD/MM/AAAA y HH:MM (24h).</p>
+
+        <div class="row">
+          <div style="flex:1; min-width:220px">
+            <label>Fecha Entrada (DD/MM/AAAA)</label>
+            <input name="fecha_entrada" placeholder="DD/MM/AAAA"/>
+          </div>
+          <div style="flex:1; min-width:180px">
+            <label>Hora Entrada (HH:MM)</label>
+            <input name="hora_entrada" placeholder="HH:MM"/>
+          </div>
+        </div>
+
+        <div class="row">
+          <div style="flex:1; min-width:220px">
+            <label>Fecha Salida (DD/MM/AAAA)</label>
+            <input name="fecha_salida" placeholder="DD/MM/AAAA"/>
+          </div>
+          <div style="flex:1; min-width:180px">
+            <label>Hora Salida (HH:MM)</label>
+            <input name="hora_salida" placeholder="HH:MM"/>
+          </div>
+        </div>
+
+        <div style="margin-top:12px">
+          <button class="btn" type="submit" name="accion" value="manual">Registrar Entrada/Salida MANUAL</button>
+        </div>
+      </form>
+      {alert}
+    </div>
+    '''
+    return page("Añadir Horas", body)
+
+
+@app.post("/encargado/horas/registrar")
+def admin_horas_registrar(
+    request: Request,
+    worker_code: str = Form(""),
+    sala: str = Form(""),
+    accion: str = Form(""),
+    fecha_entrada: str = Form(""),
+    hora_entrada: str = Form(""),
+    fecha_salida: str = Form(""),
+    hora_salida: str = Form(""),
+):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    wcode = (worker_code or "").strip().upper()
+    sala_name = (sala or "").strip()
+    act = (accion or "").strip().lower()
+
+    if not wcode or not sala_name:
+        msg = "Debes seleccionar trabajador y sala."
+        return RedirectResponse(f"/encargado/horas/anadir?msg={quote(msg)}", status_code=303)
+
+    w = get_user_by_code(wcode)
+    if not w:
+        msg = "Trabajador no válido."
+        return RedirectResponse(f"/encargado/horas/anadir?msg={quote(msg)}", status_code=303)
+
+    open_row = db_one(
+        """
+        select id, entry_at, exit_at
+        from public.wom_hours
+        where upper(coalesce(user_code,'')) = upper(%s)
+          and room_name = %s
+          and exit_at is null
+          and entry_at is not null
+        order by entry_at desc
+        limit 1;
+        """,
+        (wcode, sala_name),
+    )
+
+    now_dt = now_madrid()
+
+    try:
+        if act == "entrada":
+            if open_row:
+                msg = "Debe registrar la salida del trabajador primero."
+                return RedirectResponse(
+                    f"/encargado/horas/anadir?worker={quote(wcode)}&sala={quote(sala_name)}&msg={quote(msg)}",
+                    status_code=303,
+                )
+            db_exec(
+                """
+                insert into public.wom_hours (user_code, user_name, room_name, entry_at, exit_at, created_by_code, is_manual, updated_at)
+                values (%s,%s,%s,%s,null,%s,false,now());
+                """,
+                (wcode, w.get("nombre"), sala_name, now_dt, u.get("codigo")),
+            )
+            msg = "Entrada registrada correctamente."
+            return RedirectResponse(
+                f"/encargado/horas/anadir?worker={quote(wcode)}&sala={quote(sala_name)}&ok=1&msg={quote(msg)}",
+                status_code=303,
+            )
+
+        if act == "salida":
+            if not open_row:
+                msg = "Debe registrar la entrada del trabajador primero."
+                return RedirectResponse(
+                    f"/encargado/horas/anadir?worker={quote(wcode)}&sala={quote(sala_name)}&msg={quote(msg)}",
+                    status_code=303,
+                )
+            db_exec("update public.wom_hours set exit_at=%s, updated_at=now() where id=%s;", (now_dt, open_row["id"]))
+            msg = "Salida registrada correctamente."
+            return RedirectResponse(
+                f"/encargado/horas/anadir?worker={quote(wcode)}&sala={quote(sala_name)}&ok=1&msg={quote(msg)}",
+                status_code=303,
+            )
+
+        if act == "manual":
+            fe = (fecha_entrada or "").strip()
+            he = (hora_entrada or "").strip()
+            fs = (fecha_salida or "").strip()
+            hs = (hora_salida or "").strip()
+
+            entry_dt = None
+            exit_dt = None
+
+            if fe or he:
+                if not fe or not he:
+                    raise ValueError("Para entrada manual debes indicar fecha y hora.")
+                entry_dt = parse_fecha_hora_es(fe, he)
+
+            if fs or hs:
+                if not fs or not hs:
+                    raise ValueError("Para salida manual debes indicar fecha y hora.")
+                exit_dt = parse_fecha_hora_es(fs, hs)
+
+            if not entry_dt and not exit_dt:
+                raise ValueError("Debes indicar al menos una entrada o una salida.")
+
+            if entry_dt and exit_dt:
+                if open_row:
+                    raise ValueError("Debe registrar la salida del trabajador primero.")
+                if exit_dt <= entry_dt:
+                    raise ValueError("La salida debe ser posterior a la entrada.")
+                db_exec(
+                    """
+                    insert into public.wom_hours (user_code, user_name, room_name, entry_at, exit_at, created_by_code, is_manual, updated_at)
+                    values (%s,%s,%s,%s,%s,%s,true,now());
+                    """,
+                    (wcode, w.get("nombre"), sala_name, entry_dt, exit_dt, u.get("codigo")),
+                )
+                msg = "Entrada y salida manual registradas correctamente."
+                return RedirectResponse(
+                    f"/encargado/horas/anadir?worker={quote(wcode)}&sala={quote(sala_name)}&ok=1&msg={quote(msg)}",
+                    status_code=303,
+                )
+
+            if entry_dt and not exit_dt:
+                if open_row:
+                    raise ValueError("Debe registrar la salida del trabajador primero.")
+                db_exec(
+                    """
+                    insert into public.wom_hours (user_code, user_name, room_name, entry_at, exit_at, created_by_code, is_manual, updated_at)
+                    values (%s,%s,%s,%s,null,%s,true,now());
+                    """,
+                    (wcode, w.get("nombre"), sala_name, entry_dt, u.get("codigo")),
+                )
+                msg = "Entrada manual registrada correctamente."
+                return RedirectResponse(
+                    f"/encargado/horas/anadir?worker={quote(wcode)}&sala={quote(sala_name)}&ok=1&msg={quote(msg)}",
+                    status_code=303,
+                )
+
+            if exit_dt and not entry_dt:
+                if not open_row:
+                    raise ValueError("Debe registrar la entrada del trabajador primero.")
+                db_exec(
+                    "update public.wom_hours set exit_at=%s, updated_at=now(), is_manual=true where id=%s;",
+                    (exit_dt, open_row["id"]),
+                )
+                msg = "Salida manual registrada correctamente."
+                return RedirectResponse(
+                    f"/encargado/horas/anadir?worker={quote(wcode)}&sala={quote(sala_name)}&ok=1&msg={quote(msg)}",
+                    status_code=303,
+                )
+
+        msg = "Acción no válida."
+        return RedirectResponse(
+            f"/encargado/horas/anadir?worker={quote(wcode)}&sala={quote(sala_name)}&msg={quote(msg)}",
+            status_code=303,
+        )
+
+    except Exception as ex:
+        msg = str(ex) if str(ex) else "Error al registrar."
+        return RedirectResponse(
+            f"/encargado/horas/anadir?worker={quote(wcode)}&sala={quote(sala_name)}&msg={quote(msg)}",
+            status_code=303,
+        )
+
+
+@app.get("/encargado/horas/consultar", response_class=HTMLResponse)
+def admin_horas_consultar(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    workers = get_workers_for_hours()
+    now = now_madrid()
+
+    sel_worker = (request.query_params.get("worker") or "").strip().upper()
+    mes = (request.query_params.get("mes") or str(now.month)).strip()
+    anio = (request.query_params.get("anio") or str(now.year)).strip()
+
+    msg = (request.query_params.get("msg") or "").strip()
+    ok = (request.query_params.get("ok") or "").strip() == "1"
+
+    opts_workers = "<option value=''>-- Selecciona trabajador --</option>"
+    for w in workers:
+        code = (w.get("code") or "").strip().upper()
+        name = w.get("name") or ""
+        label = f"{name} ({code})"
+        sel = " selected" if code == sel_worker else ""
+        opts_workers += f"<option value='{h(code)}'{sel}>{h(label)}</option>"
+
+    opts_mes = ""
+    try:
+        mes_int = int(mes)
+    except Exception:
+        mes_int = now.month
+    for m_ in range(1, 13):
+        sel = " selected" if m_ == mes_int else ""
+        opts_mes += f"<option value='{m_}'{sel}>{m_:02d}</option>"
+
+    opts_anio = ""
+    for y_ in range(now.year - 1, now.year + 2):
+        sel = " selected" if str(y_) == anio else ""
+        opts_anio += f"<option value='{y_}'{sel}>{y_}</option>"
+
+    alert = ""
+    if msg:
+        color = "#0a6" if ok else "#c00"
+        alert = f"<div style='margin-top:10px;font-weight:700;color:{color};'>{h(msg)}</div>"
+
+    rows = []
+    error = ""
+    total = 0.0
+
+    if sel_worker:
+        try:
+            mes_i = int(mes); anio_i = int(anio)
+            ts_start, ts_end = month_bounds(anio_i, mes_i)
+            rows = db_all(
+                """
+                select id, room_name, entry_at, exit_at
+                from public.wom_hours
+                where upper(coalesce(user_code,'')) = upper(%s)
+                  and entry_at >= %s and entry_at < %s
+                order by entry_at asc;
+                """,
+                (sel_worker, ts_start, ts_end),
+            )
+        except Exception as ex:
+            error = str(ex)
+
+    trs = ""
+    for r_ in rows:
+        ent_f, ent_h = formatear_fecha_hora(r_.get("entry_at"))
+        sal_f, sal_h = formatear_fecha_hora(r_.get("exit_at")) if r_.get("exit_at") else ("-", "-")
+
+        horas = None
+        if r_.get("entry_at") and r_.get("exit_at"):
+            dt_in = r_["entry_at"]
+            dt_out = r_["exit_at"]
+            if isinstance(dt_in, str):
+                dt_in = datetime.fromisoformat(dt_in)
+            if isinstance(dt_out, str):
+                dt_out = datetime.fromisoformat(dt_out)
+            if dt_in.tzinfo is None:
+                dt_in = dt_in.replace(tzinfo=TZ)
+            else:
+                dt_in = dt_in.astimezone(TZ)
+            if dt_out.tzinfo is None:
+                dt_out = dt_out.replace(tzinfo=TZ)
+            else:
+                dt_out = dt_out.astimezone(TZ)
+            hraw = (dt_out - dt_in).total_seconds() / 3600.0
+            horas = round_hours_to_half(hraw)
+            total += horas
+
+        del_form = f"""
+        <form method="post" action="/encargado/horas/eliminar/{int(r_['id'])}" onsubmit="return confirm('¿Eliminar este registro?');">
+          <input type="hidden" name="worker" value="{h(sel_worker)}"/>
+          <input type="hidden" name="mes" value="{h(mes)}"/>
+          <input type="hidden" name="anio" value="{h(anio)}"/>
+          <button class="btn danger" type="submit">Eliminar</button>
+        </form>
+        """
+
+        trs += f"""
+        <tr>
+          <td>{h(r_.get('room_name',''))}</td>
+          <td>{h(ent_f)} {h(ent_h)}</td>
+          <td>{h(sal_f)} {h(sal_h)}</td>
+          <td style="text-align:right">{h(fmt_hours_es(horas))}</td>
+          <td style="width:120px">{del_form}</td>
+        </tr>
+        """
+
+    total_txt = fmt_hours_es(round_hours_to_half(total)) if sel_worker else "-"
+    total_row = f"<div style='margin-top:10px;font-weight:800'>TOTAL: {h(total_txt)} horas</div>" if sel_worker else ""
+
+    body = f"""
+    <div class="top">
+      <div><h2>Consultar Horas</h2></div>
+      <div><a class="btn2" href="/encargado/horas">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <form method="get" action="/encargado/horas/consultar">
+        <div class="row">
+          <div style="flex:1; min-width:260px">
+            <label>Trabajador</label>
+            <select name="worker">{opts_workers}</select>
+          </div>
+          <div style="width:140px">
+            <label>Mes</label>
+            <select name="mes">{opts_mes}</select>
+          </div>
+          <div style="width:160px">
+            <label>Año</label>
+            <select name="anio">{opts_anio}</select>
+          </div>
+        </div>
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Buscar</button>
+        </div>
+      </form>
+      {alert}
+      {f"<div style='margin-top:10px;font-weight:700;color:#c00'>{h(error)}</div>" if error else ""}
+    </div>
+
+    <div class="card">
+      <table>
+        <thead><tr><th>Sala</th><th>Entrada</th><th>Salida</th><th style="text-align:right">NºHoras</th><th></th></tr></thead>
+        <tbody>
+          {trs or "<tr><td colspan='5'>No hay registros.</td></tr>"}
+        </tbody>
+      </table>
+      {total_row}
+    </div>
+    """
+    return page("Consultar Horas", body)
+
+
+@app.post("/encargado/horas/eliminar/{log_id}")
+def admin_horas_eliminar(
+    request: Request,
+    log_id: int,
+    worker: str = Form(""),
+    mes: str = Form(""),
+    anio: str = Form(""),
+):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    try:
+        db_exec("delete from public.wom_hours where id=%s;", (int(log_id),))
+        msg = "Registro eliminado."
+        return RedirectResponse(
+            f"/encargado/horas/consultar?worker={quote((worker or '').strip())}&mes={quote((mes or '').strip())}&anio={quote((anio or '').strip())}&ok=1&msg={quote(msg)}",
+            status_code=303,
+        )
+    except Exception as ex:
+        msg = str(ex) if str(ex) else "Error al eliminar."
+        return RedirectResponse(
+            f"/encargado/horas/consultar?worker={quote((worker or '').strip())}&mes={quote((mes or '').strip())}&anio={quote((anio or '').strip())}&msg={quote(msg)}",
+            status_code=303,
+        )
+
+
+def generar_pdf_horas(worker_code: str, mes: int, anio: int) -> Path:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.platypus.flowables import HRFlowable
+
+    w = get_user_by_code(worker_code)
+    if not w:
+        raise ValueError("Trabajador no válido.")
+
+    ts_start, ts_end = month_bounds(int(anio), int(mes))
+    rows = db_all(
+        """
+        select room_name, entry_at, exit_at
+        from public.wom_hours
+        where upper(coalesce(user_code,'')) = upper(%s)
+          and entry_at >= %s and entry_at < %s
+        order by entry_at asc;
+        """,
+        (worker_code, ts_start, ts_end),
+    )
+
+    data = [["SALA", "ENTRADA", "SALIDA", "NºHORAS"]]
+    total = 0.0
+
+    for r_ in rows:
+        ent_f, ent_h = formatear_fecha_hora(r_.get("entry_at"))
+        sal_f, sal_h = formatear_fecha_hora(r_.get("exit_at")) if r_.get("exit_at") else ("-", "-")
+        horas = None
+        if r_.get("entry_at") and r_.get("exit_at"):
+            dt_in = r_["entry_at"]
+            dt_out = r_["exit_at"]
+            if isinstance(dt_in, str):
+                dt_in = datetime.fromisoformat(dt_in)
+            if isinstance(dt_out, str):
+                dt_out = datetime.fromisoformat(dt_out)
+            if dt_in.tzinfo is None:
+                dt_in = dt_in.replace(tzinfo=TZ)
+            else:
+                dt_in = dt_in.astimezone(TZ)
+            if dt_out.tzinfo is None:
+                dt_out = dt_out.replace(tzinfo=TZ)
+            else:
+                dt_out = dt_out.astimezone(TZ)
+            hraw = (dt_out - dt_in).total_seconds() / 3600.0
+            horas = round_hours_to_half(hraw)
+            total += horas
+
+        data.append(
+            [
+                r_.get("room_name") or "",
+                f"{ent_f} {ent_h}",
+                f"{sal_f} {sal_h}",
+                fmt_hours_es(horas),
+            ]
+        )
+
+    total_red = round_hours_to_half(total)
+    data.append(["", "", "TOTAL", fmt_hours_es(total_red)])
+
+    out_dir = Path.cwd()
+    ts = now_madrid().strftime("%Y%m%d_%H%M%S")
+    out_path = out_dir / f"horas_{worker_code}_{anio}{int(mes):02d}_{ts}.pdf"
+
+    doc = SimpleDocTemplate(
+        str(out_path),
+        pagesize=A4,
+        leftMargin=12 * mm,
+        rightMargin=12 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
+        title="Horas de Trabajo de Mantenimiento",
+    )
+
+    styles = getSampleStyleSheet()
+    st_title = ParagraphStyle("t", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=16, leading=18, spaceAfter=6)
+    st_info = ParagraphStyle("i", parent=styles["Normal"], fontName="Helvetica", fontSize=11, leading=13, spaceAfter=2)
+    st_mono = ParagraphStyle("m", parent=styles["Normal"], fontName="Courier", fontSize=8, leading=9)
+
+    story = []
+    story.append(Paragraph("HORAS DE TRABAJO DE MANTENIMIENTO", st_title))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(f"Trabajador: <b>{_xml_escape(w.get('nombre') or '')}</b>", st_info))
+    story.append(Paragraph(f"Mes y año: <b>{int(mes):02d}/{int(anio)}</b>", st_info))
+    story.append(Spacer(1, 8))
+    story.append(HRFlowable(width="100%", thickness=1.0, color=colors.black))
+    story.append(Spacer(1, 10))
+
+    table_rows = []
+    for row in data:
+        table_rows.append([Paragraph(_xml_escape(str(c)), st_mono) for c in row])
+
+    tbl = Table(table_rows, colWidths=[45 * mm, 50 * mm, 50 * mm, 20 * mm], repeatRows=1)
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("ALIGN", (3, 1), (3, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("SPAN", (0, -1), (1, -1)),
+                ("ALIGN", (2, -1), (2, -1), "RIGHT"),
+                ("FONTNAME", (0, 0), (-1, -1), "Courier"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+
+    story.append(tbl)
+    doc.build(story)
+    return out_path
+
+
+@app.get("/encargado/horas/pdf", response_class=HTMLResponse)
+def admin_horas_pdf_form(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    workers = get_workers_for_hours()
+    now = now_madrid()
+    sel_worker = (request.query_params.get("worker") or "").strip().upper()
+    mes = (request.query_params.get("mes") or str(now.month)).strip()
+    anio = (request.query_params.get("anio") or str(now.year)).strip()
+
+    opts_workers = "<option value=''>-- Selecciona trabajador --</option>"
+    for w in workers:
+        code = (w.get("code") or "").strip().upper()
+        name = w.get("name") or ""
+        label = f"{name} ({code})"
+        sel = " selected" if code == sel_worker else ""
+        opts_workers += f"<option value='{h(code)}'{sel}>{h(label)}</option>"
+
+    opts_mes = ""
+    try:
+        mes_int = int(mes)
+    except Exception:
+        mes_int = now.month
+    for m_ in range(1, 13):
+        sel = " selected" if m_ == mes_int else ""
+        opts_mes += f"<option value='{m_}'{sel}>{m_:02d}</option>"
+
+    opts_anio = ""
+    for y_ in range(now.year - 1, now.year + 2):
+        sel = " selected" if str(y_) == anio else ""
+        opts_anio += f"<option value='{y_}'{sel}>{y_}</option>"
+
+    msg = (request.query_params.get("msg") or "").strip()
+    alert = f"<div style='margin-top:10px;font-weight:700;color:#c00'>{h(msg)}</div>" if msg else ""
+
+    body = f'''
+    <div class="top">
+      <div><h2>Generar PDF de Horas</h2></div>
+      <div><a class="btn2" href="/encargado/horas">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <form method="post" action="/encargado/horas/pdf">
+        <div class="row">
+          <div style="flex:1; min-width:260px">
+            <label>Trabajador</label>
+            <select name="worker">{opts_workers}</select>
+          </div>
+          <div style="width:140px">
+            <label>Mes</label>
+            <select name="mes">{opts_mes}</select>
+          </div>
+          <div style="width:160px">
+            <label>Año</label>
+            <select name="anio">{opts_anio}</select>
+          </div>
+        </div>
+        <div style="margin-top:12px">
+          <button class="btn" type="submit">Generar PDF</button>
+        </div>
+      </form>
+      {alert}
+    </div>
+    '''
+    return page("PDF Horas", body)
+
+
+@app.post("/encargado/horas/pdf")
+def admin_horas_pdf_generate(request: Request, worker: str = Form(""), mes: str = Form(""), anio: str = Form("")):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    w = (worker or "").strip().upper()
+    if not w:
+        return RedirectResponse(f"/encargado/horas/pdf?msg={quote('Debes seleccionar trabajador')}", status_code=303)
+    try:
+        mes_i = int(mes); anio_i = int(anio)
+        pdf_path = generar_pdf_horas(w, mes_i, anio_i)
+        return FileResponse(str(pdf_path), media_type="application/pdf", filename=pdf_path.name)
+    except Exception as ex:
+        msg = str(ex) if str(ex) else "Error al generar PDF."
+        return RedirectResponse(
+            f"/encargado/horas/pdf?worker={quote(w)}&mes={quote(mes)}&anio={quote(anio)}&msg={quote(msg)}",
+            status_code=303,
+        )
 
 
 @app.get("/encargado/pendientes", response_class=HTMLResponse)
