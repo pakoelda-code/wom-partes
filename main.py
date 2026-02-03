@@ -128,15 +128,6 @@ def db_exec(sql: str, params=()) -> None:
         conn.commit()
 
 
-def db_exec_safe(sql: str, params=()) -> None:
-    """Ejecuta SQL ignorando errores (migraciones suaves)."""
-    try:
-        db_exec(sql, params)
-    except Exception:
-        # En Render/Supabase preferimos continuar con el arranque
-        pass
-
-
 def ensure_schema_and_seed() -> None:
     db_exec(
         """
@@ -213,43 +204,15 @@ def ensure_schema_and_seed() -> None:
     );
     """
     )
-    
-    # Migración suave de wom_hours (si la tabla ya existía con otra estructura)
-    db_exec_safe("alter table public.wom_hours add column if not exists worker_code text;")
-    db_exec_safe("alter table public.wom_hours add column if not exists worker_name text;")
-    db_exec_safe("alter table public.wom_hours add column if not exists room_name text;")
-    db_exec_safe("alter table public.wom_hours add column if not exists entry_at timestamptz;")
-    db_exec_safe("alter table public.wom_hours add column if not exists exit_at timestamptz;")
-    db_exec_safe("alter table public.wom_hours add column if not exists recorded_by_code text;")
-    db_exec_safe("alter table public.wom_hours add column if not exists recorded_by_name text not null default '';")
-    db_exec_safe("alter table public.wom_hours add column if not exists created_at timestamptz not null default now();")
-
-    db_exec_safe("create index if not exists wom_hours_worker_idx on public.wom_hours(worker_code);")
-    db_exec_safe("create index if not exists wom_hours_entry_idx on public.wom_hours(entry_at desc);")
-    db_exec_safe("create index if not exists wom_hours_room_idx on public.wom_hours(room_name);")
+    db_exec("create index if not exists wom_hours_worker_idx on public.wom_hours(worker_code);")
+    db_exec("create index if not exists wom_hours_entry_idx on public.wom_hours(entry_at desc);")
+    db_exec("create index if not exists wom_hours_room_idx on public.wom_hours(room_name);")
 
     
     # Migración suave (si la tabla ya existía)
     db_exec("alter table public.wom_tickets add column if not exists priority text not null default 'MEDIO';")
     db_exec("alter table public.wom_tickets add column if not exists image_url text;")
     db_exec("alter table public.wom_tickets add column if not exists image_path text;")
-
-    # Tabla de imágenes por parte (hasta 3 por ticket)
-    db_exec(
-        """
-    create table if not exists public.wom_ticket_images (
-      id bigserial primary key,
-      ticket_id bigint not null references public.wom_tickets(id) on delete cascade,
-      position smallint not null check (position between 1 and 3),
-      image_url text not null,
-      image_path text not null,
-      created_at timestamptz not null default now(),
-      unique(ticket_id, position)
-    );
-    """
-    )
-    db_exec_safe("create index if not exists wom_ticket_images_ticket_idx on public.wom_ticket_images(ticket_id);")
-    db_exec_safe("create index if not exists wom_ticket_images_created_idx on public.wom_ticket_images(created_at desc);")
     db_exec("create index if not exists wom_tickets_priority_idx on public.wom_tickets(priority);")
     db_exec(
         "create index if not exists wom_tickets_created_at_idx on public.wom_tickets(created_at desc);"
@@ -392,7 +355,6 @@ def supabase_storage_upload(bucket: str, path: str, file_bytes: bytes, content_t
         (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
         or (os.getenv("SUPABASE_SERVICE_KEY", "") or "").strip()
         or (os.getenv("SUPABASE_KEY", "") or "").strip()
-        or (os.getenv("SUPABASE_ANON_KEY", "") or "").strip()
     )
     if not supabase_url or not key:
         raise RuntimeError("Falta SUPABASE_URL y/o SUPABASE_SERVICE_ROLE_KEY (o SUPABASE_KEY)")
@@ -753,38 +715,13 @@ def render_ticket_blocks(
             rep_txt = "(No aplica)"
 
         obs = (p.get("observaciones_encargado") or "").strip() or "(Sin observaciones)"
-    
-    # --- Imágenes adjuntas (hasta 3) ---
-    imgs: List[str] = []
-    try:
-        if p.get("id"):
-            rows = db_all(
-                "select image_url from public.wom_ticket_images where ticket_id=%s order by position asc;",
-                (p["id"],),
-            )
-            imgs = [(r.get("image_url") or "").strip() for r in rows if (r.get("image_url") or "").strip()]
-    except Exception:
-        imgs = []
-
-    if not imgs:
-        single = (p.get("image_url") or "").strip()
-        if single:
-            imgs = [single]
-
+    image_url = (p.get("image_url") or "").strip()
     img_block = ""
-    if imgs:
-        links = " ".join(
-            [f"<a class='btn2' href='{h(url)}' target='_blank'>Ver imagen {i}</a>" for i, url in enumerate(imgs, start=1)]
+    if image_url:
+        img_block = (
+            f"<p><b>Imagen adjunta:</b> <a class='btn2' href='{h(image_url)}' target='_blank'>Ver imagen</a></p>"
+            f"<div style='margin-top:10px'><img src='{h(image_url)}' style='max-width:100%; border:1px solid #ddd; border-radius:12px'/></div>"
         )
-        thumbs = "".join(
-            [
-                f"<a href='{h(url)}' target='_blank' style='display:inline-block;margin:6px 10px 0 0'>"
-                f"<img src='{h(url)}' style='max-width:260px; max-height:200px; border:1px solid #ddd; border-radius:12px'/>"
-                f"</a>"
-                for url in imgs
-            ]
-        )
-        img_block = f"<p><b>Imágenes adjuntas:</b> {links}</p><div style='margin-top:10px'>{thumbs}</div>"
         desc = (p.get("descripcion") or "").strip() or "(Sin descripción)"
 
         header = h(ref)
@@ -856,7 +793,7 @@ def login_page(request: Request):
     body = '''
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-      <p class="muted"><i>Version 2.1 Febrero 2026</i></p>
+      <p class="muted"><i>Versión 1.5 Enero 2026</i></p>
       <form method="post" action="/login">
         <label>Código personal</label>
         <input name="codigo" placeholder="Ej: A123B" autocomplete="off"/>
@@ -866,10 +803,11 @@ def login_page(request: Request):
       </form>
 
       <p class="muted" style="margin-top:14px; font-style:italic; font-size:0.92em;">
-        *** Novedades de la Versión 2.1 ***<br/><br/>
-        - Nueva corrección de errores de creación de formularios<br/>
-        - Ahora los trabajadores pueden añadir IMÁGENES a los partes<br/>
-        - Nuevas opciones de registro en el menú de encargado y en PDFs
+        *** Novedades de la Versión 1.5 ***<br/><br/>
+        - Corrección de errores de creación de formularios<br/>
+        - Ahora los trabajadores pueden filtrar por mes y año su listado de partes Finalizados<br/>
+        - Nuevas opciones de registro en el menú de encargado<br/>
+        - Corrección de arreglos en el menú de Jefes
       </p>
     </div>
     '''
@@ -998,8 +936,7 @@ def worker_new_form(request: Request):
         </div>
 
         <label>Imagen (opcional)</label>
-        <input type="file" name="imagenes" accept="image/*" multiple/>
-        <div class="muted" style="margin-top:6px">Máximo 3 imágenes. Formatos: JPG/PNG/WEBP. Máx 5MB cada una.</div>
+        <input type="file" name="imagen" accept="image/*"/>
 
         <div style="margin-top:12px">
           <button class="btn" type="submit">Guardar parte</button>
@@ -1038,7 +975,6 @@ def worker_new_submit(
     solucionado: str = Form("NO"),
     reparacion_usuario: str = Form(""),
     imagen: UploadFile = File(None),
-    imagenes: List[UploadFile] = File(None),
 ):
     r = require_login(request)
     if r:
@@ -1058,126 +994,52 @@ def worker_new_submit(
     sol = (solucionado or "").strip().upper() == "SI"
     rep = (reparacion_usuario or "").strip() if sol else ""
 
-
-    # --- Imágenes (máx 3) ---
-    files: List[UploadFile] = []
-    if imagenes:
-        files = [f for f in imagenes if f is not None and getattr(f, "filename", "")]
-    elif imagen is not None and getattr(imagen, "filename", ""):
-        files = [imagen]
-
-    if len(files) > 3:
-        return HTMLResponse(
-            page(
-                "Error",
-                "<div class='card'><h3>Has seleccionado más de 3 imágenes</h3>"
-                "<p class='muted'>El máximo permitido es 3 imágenes por parte.</p>"
-                "<p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>",
-            ),
-            status_code=400,
-        )
-
-    uploaded: List[Tuple[int, str, str]] = []  # (position, url, path)
-    image_url: Optional[str] = None
-    image_path: Optional[str] = None
-
-    if files:
-        bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "partes")
-        for i, f in enumerate(files, start=1):
-            raw = f.file.read()
-            if not raw:
-                continue
+    image_url = None
+    image_path = None
+    if imagen is not None and getattr(imagen, "filename", ""):
+        raw = imagen.file.read()
+        if raw:
             if len(raw) > 5 * 1024 * 1024:
                 return HTMLResponse(
-                    page(
-                        "Error",
-                        "<div class='card'><h3>Una de las imágenes supera 5MB</h3>"
-                        "<p class='muted'>Reduce el tamaño e inténtalo de nuevo.</p>"
-                        "<p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>",
-                    ),
+                    page("Error", "<div class='card'><h3>La imagen supera 5MB</h3><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
                     status_code=400,
                 )
-
-            ext = _safe_ext(f.filename)
+            ext = _safe_ext(imagen.filename)
             if not ext:
-                guessed = mimetypes.guess_extension(f.content_type or "")
+                guessed = mimetypes.guess_extension(imagen.content_type or "")
                 ext = guessed if guessed in (".jpg", ".jpeg", ".png", ".webp") else ""
             if not ext:
                 return HTMLResponse(
-                    page(
-                        "Error",
-                        "<div class='card'><h3>Formato de imagen no permitido (usa JPG/PNG/WEBP)</h3>"
-                        "<p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>",
-                    ),
+                    page("Error", "<div class='card'><h3>Formato de imagen no permitido (usa JPG/PNG/WEBP)</h3><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
                     status_code=400,
                 )
 
+            bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "partes")
             ts = now_madrid().strftime("%Y%m%d_%H%M%S")
             token = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(6))
-            img_path = f"tickets/{ref}_{ts}_{token}_{i}{ext}"
-
+            image_path = f"tickets/{ref}_{ts}_{token}{ext}"
             try:
-                url = supabase_storage_upload(bucket, img_path, raw, f.content_type or "")
+                image_url = supabase_storage_upload(bucket, image_path, raw, imagen.content_type or "")
             except Exception as ex:
-                # Mensaje claro: falta configuración en Render/Supabase
                 return HTMLResponse(
-                    page(
-                        "Error",
-                        "<div class='card'><h3>Error subiendo la imagen</h3>"
-                        f"<p class='muted'>{h(str(ex))}</p>"
-                        "<p class='muted'>Revisa en Render las variables SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY "
-                        "(o SUPABASE_KEY / SUPABASE_ANON_KEY) y que exista el bucket.</p>"
-                        "<p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>",
-                    ),
+                    page("Error", f"<div class='card'><h3>Error subiendo la imagen</h3><p class='muted'>{h(str(ex))}</p><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
                     status_code=500,
                 )
-
-            uploaded.append((i, url, img_path))
-
-        if uploaded:
-            image_url = uploaded[0][1]
-            image_path = uploaded[0][2]
-
 
     room = db_one("select id, name from public.wom_rooms where name=%s;", (sala_name,))
     room_id = room["id"] if room else None
 
-
-    ins = db_one(
+    db_exec(
         """
         insert into public.wom_tickets
         (referencia, created_by_code, created_by_name, room_id, room_name, tipo, priority, descripcion,
          solucionado_por_usuario, reparacion_usuario, image_url, image_path, visto_por_encargado, estado_encargado, observaciones_encargado)
         values
         (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, 'SIN ESTADO', '')
-        on conflict (referencia) do nothing
-        returning id;
-        """,
+        on conflict (referencia) do nothing;
+    """,
         (ref, u["codigo"], u["nombre"], room_id, sala_name, tipo_name, prio, desc, sol, rep, image_url, image_path),
     )
-    ticket_id = ins["id"] if ins and ins.get("id") is not None else None
-    if not ticket_id:
-        row = db_one("select id from public.wom_tickets where referencia=%s;", (ref,))
-        ticket_id = row["id"] if row else None
-
-    if ticket_id and uploaded:
-        for posi, url, pth in uploaded:
-            db_exec(
-                """
-                insert into public.wom_ticket_images (ticket_id, position, image_url, image_path)
-                values (%s, %s, %s, %s)
-                on conflict (ticket_id, position) do update
-                  set image_url=excluded.image_url,
-                      image_path=excluded.image_path;
-                """,
-                (ticket_id, posi, url, pth),
-            )
-        # Mantener compatibilidad: guardar también la primera imagen en wom_tickets
-        db_exec(
-            "update public.wom_tickets set image_url=%s, image_path=%s where id=%s;",
-            (uploaded[0][1], uploaded[0][2], ticket_id),
-        )
-
 
     return RedirectResponse(f"/parte/{ref}", status_code=303)
 
@@ -1598,6 +1460,30 @@ def parte_detalle(request: Request, ref: str):
           <p>{h(obs).replace(chr(10),"<br/>")}</p>
         </div>
         """
+
+    # --- Imágenes adjuntas (hasta 3) ---
+    imgs: List[str] = []
+    try:
+        if p.get("id"):
+            rows = db_all(
+                "select image_url from public.wom_ticket_images where ticket_id=%s order by position asc;",
+                (p["id"],),
+            )
+            imgs = [(r.get("image_url") or "").strip() for r in rows if (r.get("image_url") or "").strip()]
+    except Exception:
+        imgs = []
+
+    if not imgs:
+        single = (p.get("image_url") or "").strip()
+        if single:
+            imgs = [single]
+
+    img_block = ""
+    if imgs:
+        links = []
+        for i, url in enumerate(imgs, start=1):
+            links.append(f'<a href="{h(url)}" target="_blank">📷 Ver imagen {i}</a>')
+        img_block = "<p><b>Imágenes:</b><br/>" + "<br/>".join(links) + "</p>"
 
     back = role_home_path(u["rol"])
     body = f"""
@@ -2990,4 +2876,3 @@ def horas_pdf_generate(
 
     doc.build(story)
     return FileResponse(str(out_path), media_type="application/pdf", filename=out_path.name)
-
