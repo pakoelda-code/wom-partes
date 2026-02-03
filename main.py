@@ -182,6 +182,18 @@ def db_exec(sql: str, params=()) -> None:
         conn.commit()
 
 
+
+
+def db_exec_safe(sql: str, params=(), label: str = "") -> None:
+    """Ejecuta SQL sin tumbar la app (para migraciones suaves)."""
+    try:
+        db_exec(sql, params)
+    except Exception as e:
+        if label:
+            print(f"[db_exec_safe:{label}] {e}")
+        else:
+            print(f"[db_exec_safe] {e}")
+
 def ensure_schema_and_seed() -> None:
     db_exec(
         """
@@ -258,6 +270,103 @@ def ensure_schema_and_seed() -> None:
     );
     """
     )
+
+    # --- Migración suave: compatibilidad con esquemas antiguos de wom_hours ---
+    # Algunos despliegues antiguos tenían columnas user_code/user_name NOT NULL sin DEFAULT.
+    # Si existen, las dejamos con DEFAULT '' y permitimos NULL para evitar errores al insertar.
+    db_exec_safe(
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='user_name'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ALTER COLUMN user_name SET DEFAULT ''''';
+            BEGIN
+              EXECUTE 'ALTER TABLE public.wom_hours ALTER COLUMN user_name DROP NOT NULL';
+            EXCEPTION WHEN others THEN
+              -- por si ya es nullable
+              NULL;
+            END;
+          END IF;
+
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='user_code'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ALTER COLUMN user_code SET DEFAULT ''''';
+            BEGIN
+              EXECUTE 'ALTER TABLE public.wom_hours ALTER COLUMN user_code DROP NOT NULL';
+            EXCEPTION WHEN others THEN
+              NULL;
+            END;
+          END IF;
+
+          -- Asegurar columnas esperadas por esta versión
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='recorded_by_name'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ADD COLUMN recorded_by_name text NOT NULL DEFAULT ''''';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='recorded_by_code'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ADD COLUMN recorded_by_code text NULL';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='worker_code'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ADD COLUMN worker_code text NULL';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='worker_name'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ADD COLUMN worker_name text NULL';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='room_name'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ADD COLUMN room_name text NULL';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='entry_at'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ADD COLUMN entry_at timestamptz NULL';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='exit_at'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ADD COLUMN exit_at timestamptz NULL';
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='wom_hours' AND column_name='created_at'
+          ) THEN
+            EXECUTE 'ALTER TABLE public.wom_hours ADD COLUMN created_at timestamptz NOT NULL DEFAULT now()';
+          END IF;
+        END $$;
+        """
+    , label="migrate_wom_hours")
+
+    # Índices útiles (no fallan si la columna no existe)
+    db_exec_safe("create index if not exists wom_hours_worker_idx on public.wom_hours(worker_code);", label="idx_hours_worker")
+    db_exec_safe("create index if not exists wom_hours_entry_idx on public.wom_hours(entry_at);", label="idx_hours_entry")
+
     db_exec("create index if not exists wom_hours_worker_idx on public.wom_hours(worker_code);")
     db_exec("create index if not exists wom_hours_entry_idx on public.wom_hours(entry_at desc);")
     db_exec("create index if not exists wom_hours_room_idx on public.wom_hours(room_name);")
@@ -2765,6 +2874,10 @@ def horas_add_submit(
     if r:
         return r
     u = user_from_session(request)
+    ucode = (u.get('codigo') or u.get('code') or u.get('user_code') or '').strip()
+    uname = (u.get('nombre') or u.get('name') or u.get('user_name') or '').strip()
+    if not uname: uname = ucode
+
     if u.get("rol") != "ENCARGADO":
         return RedirectResponse(role_home_path(u.get("rol", "")), status_code=303)
 
@@ -2793,7 +2906,7 @@ def horas_add_submit(
             insert into public.wom_hours (worker_code, worker_name, room_name, entry_at, exit_at, recorded_by_code, recorded_by_name)
             values (%s, %s, %s, %s, null, %s, %s);
             """,
-            (wcode, w["name"], sala, now, u["codigo"], u["nombre"]),
+            (wcode, w["name"], sala, now, ucode, uname),
         )
         return go("Entrada registrada correctamente.")
 
@@ -2802,7 +2915,7 @@ def horas_add_submit(
             return go("Debe registrar la entrada del trabajador primero.")
         db_exec(
             "update public.wom_hours set exit_at=%s, recorded_by_code=%s, recorded_by_name=%s where id=%s;",
-            (now, u["codigo"], u["nombre"], open_row["id"]),
+            (now, ucode, uname, open_row["id"]),
         )
         return go("Salida registrada correctamente.")
 
@@ -2819,7 +2932,7 @@ def horas_add_submit(
                 insert into public.wom_hours (worker_code, worker_name, room_name, entry_at, exit_at, recorded_by_code, recorded_by_name)
                 values (%s, %s, %s, %s, %s, %s, %s);
                 """,
-                (wcode, w["name"], sala, en, ex, u["codigo"], u["nombre"]),
+                (wcode, w["name"], sala, en, ex, ucode, uname),
             )
             return go("Registro manual (entrada y salida) guardado.")
 
@@ -2831,7 +2944,7 @@ def horas_add_submit(
                 insert into public.wom_hours (worker_code, worker_name, room_name, entry_at, exit_at, recorded_by_code, recorded_by_name)
                 values (%s, %s, %s, %s, null, %s, %s);
                 """,
-                (wcode, w["name"], sala, en, u["codigo"], u["nombre"]),
+                (wcode, w["name"], sala, en, ucode, uname),
             )
             return go("Entrada manual registrada correctamente.")
 
@@ -2845,7 +2958,7 @@ def horas_add_submit(
                     return go("La salida manual no puede ser anterior a la entrada registrada.")
             db_exec(
                 "update public.wom_hours set exit_at=%s, recorded_by_code=%s, recorded_by_name=%s where id=%s;",
-                (ex, u["codigo"], u["nombre"], open_row["id"]),
+                (ex, ucode, uname, open_row["id"]),
             )
             return go("Salida manual registrada correctamente.")
 
