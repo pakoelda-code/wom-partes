@@ -128,6 +128,15 @@ def db_exec(sql: str, params=()) -> None:
         conn.commit()
 
 
+def db_exec_safe(sql: str, params=()) -> None:
+    """Ejecuta SQL ignorando errores (migraciones suaves)."""
+    try:
+        db_exec(sql, params)
+    except Exception:
+        # En Render/Supabase preferimos continuar con el arranque
+        pass
+
+
 def ensure_schema_and_seed() -> None:
     db_exec(
         """
@@ -204,9 +213,20 @@ def ensure_schema_and_seed() -> None:
     );
     """
     )
-    db_exec("create index if not exists wom_hours_worker_idx on public.wom_hours(worker_code);")
-    db_exec("create index if not exists wom_hours_entry_idx on public.wom_hours(entry_at desc);")
-    db_exec("create index if not exists wom_hours_room_idx on public.wom_hours(room_name);")
+    
+    # Migración suave de wom_hours (si la tabla ya existía con otra estructura)
+    db_exec_safe("alter table public.wom_hours add column if not exists worker_code text;")
+    db_exec_safe("alter table public.wom_hours add column if not exists worker_name text;")
+    db_exec_safe("alter table public.wom_hours add column if not exists room_name text;")
+    db_exec_safe("alter table public.wom_hours add column if not exists entry_at timestamptz;")
+    db_exec_safe("alter table public.wom_hours add column if not exists exit_at timestamptz;")
+    db_exec_safe("alter table public.wom_hours add column if not exists recorded_by_code text;")
+    db_exec_safe("alter table public.wom_hours add column if not exists recorded_by_name text not null default '';")
+    db_exec_safe("alter table public.wom_hours add column if not exists created_at timestamptz not null default now();")
+
+    db_exec_safe("create index if not exists wom_hours_worker_idx on public.wom_hours(worker_code);")
+    db_exec_safe("create index if not exists wom_hours_entry_idx on public.wom_hours(entry_at desc);")
+    db_exec_safe("create index if not exists wom_hours_room_idx on public.wom_hours(room_name);")
 
     
     # Migración suave (si la tabla ya existía)
@@ -793,7 +813,7 @@ def login_page(request: Request):
     body = '''
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-      <p class="muted"><i>Versión 1.5 Enero 2026</i></p>
+      <p class="muted"><i>Version 2.1 Febrero 2026</i></p>
       <form method="post" action="/login">
         <label>Código personal</label>
         <input name="codigo" placeholder="Ej: A123B" autocomplete="off"/>
@@ -803,11 +823,10 @@ def login_page(request: Request):
       </form>
 
       <p class="muted" style="margin-top:14px; font-style:italic; font-size:0.92em;">
-        *** Novedades de la Versión 1.5 ***<br/><br/>
-        - Corrección de errores de creación de formularios<br/>
-        - Ahora los trabajadores pueden filtrar por mes y año su listado de partes Finalizados<br/>
-        - Nuevas opciones de registro en el menú de encargado<br/>
-        - Corrección de arreglos en el menú de Jefes
+        *** Novedades de la Versión 2.1 ***<br/><br/>
+        - Nueva corrección de errores de creación de formularios<br/>
+        - Ahora los trabajadores pueden añadir IMÁGENES a los partes<br/>
+        - Nuevas opciones de registro en el menú de encargado y en PDFs
       </p>
     </div>
     '''
