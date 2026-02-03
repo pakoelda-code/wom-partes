@@ -424,6 +424,101 @@ def ensure_schema_and_seed() -> None:
         """
         )
 
+
+# --- Cache de columnas para wom_hours (para compatibilidad con esquemas antiguos) ---
+_hours_cols_cache = None
+
+def hours_table_columns() -> set:
+    """Devuelve el set de columnas existentes en public.wom_hours (caché)."""
+    global _hours_cols_cache
+    if _hours_cols_cache is None:
+        try:
+            rows = db_all(
+                "select column_name from information_schema.columns where table_schema='public' and table_name='wom_hours';"
+            )
+            _hours_cols_cache = {r["column_name"] for r in rows}
+        except Exception:
+            _hours_cols_cache = set()
+    return _hours_cols_cache
+
+def hours_table_columns_reset() -> None:
+    global _hours_cols_cache
+    _hours_cols_cache = None
+
+
+def wom_hours_insert(worker_code: str, worker_name: str, room_name: str, entry_at, exit_at, actor_code: str, actor_name: str) -> None:
+    """Inserta un registro en wom_hours intentando compatibilidad con columnas antiguas (user_code/user_name)."""
+    # 1) Intento con columnas legacy (si existen en la BD)
+    try:
+        if exit_at is None:
+            db_exec(
+                """
+                insert into public.wom_hours
+                  (worker_code, worker_name, room_name, entry_at, exit_at,
+                   recorded_by_code, recorded_by_name,
+                   user_code, user_name)
+                values (%s, %s, %s, %s, null, %s, %s, %s, %s);
+                """,
+                (worker_code, worker_name, room_name, entry_at, actor_code, actor_name, actor_code, actor_name),
+            )
+        else:
+            db_exec(
+                """
+                insert into public.wom_hours
+                  (worker_code, worker_name, room_name, entry_at, exit_at,
+                   recorded_by_code, recorded_by_name,
+                   user_code, user_name)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                """,
+                (worker_code, worker_name, room_name, entry_at, exit_at, actor_code, actor_name, actor_code, actor_name),
+            )
+        return
+    except Exception as e:
+        # Undefined column -> schema moderno sin legacy
+        msg = str(e).lower()
+        if "undefinedcolumn" in msg or "column" in msg and "user_code" in msg:
+            pass
+        else:
+            raise
+
+    # 2) Reintento sin columnas legacy
+    if exit_at is None:
+        db_exec(
+            """
+            insert into public.wom_hours (worker_code, worker_name, room_name, entry_at, exit_at, recorded_by_code, recorded_by_name)
+            values (%s, %s, %s, %s, null, %s, %s);
+            """,
+            (worker_code, worker_name, room_name, entry_at, actor_code, actor_name),
+        )
+    else:
+        db_exec(
+            """
+            insert into public.wom_hours (worker_code, worker_name, room_name, entry_at, exit_at, recorded_by_code, recorded_by_name)
+            values (%s, %s, %s, %s, %s, %s, %s);
+            """,
+            (worker_code, worker_name, room_name, entry_at, exit_at, actor_code, actor_name),
+        )
+
+def wom_hours_set_exit(row_id: int, exit_at, actor_code: str, actor_name: str) -> None:
+    """Cierra un registro de wom_hours intentando compatibilidad con columnas antiguas (user_code/user_name)."""
+    try:
+        db_exec(
+            "update public.wom_hours set exit_at=%s, recorded_by_code=%s, recorded_by_name=%s, user_code=%s, user_name=%s where id=%s;",
+            (exit_at, actor_code, actor_name, actor_code, actor_name, row_id),
+        )
+        return
+    except Exception as e:
+        msg = str(e).lower()
+        if "undefinedcolumn" in msg or ("column" in msg and "user_code" in msg):
+            pass
+        else:
+            raise
+
+    db_exec(
+        "update public.wom_hours set exit_at=%s, recorded_by_code=%s, recorded_by_name=%s where id=%s;",
+        (exit_at, actor_code, actor_name, row_id),
+    )
+
     count_rooms = db_one("select count(*)::int as n from public.wom_rooms;")
     if count_rooms and count_rooms["n"] == 0:
         db_exec(
@@ -2873,13 +2968,28 @@ def horas_add_submit(
     r = require_login(request)
     if r:
         return r
-    u = user_from_session(request)
-    ucode = (u.get('codigo') or u.get('code') or u.get('user_code') or '').strip()
-    uname = (u.get('nombre') or u.get('name') or u.get('user_name') or '').strip()
-    if not uname: uname = ucode
 
-    if u.get("rol") != "ENCARGADO":
-        return RedirectResponse(role_home_path(u.get("rol", "")), status_code=303)
+    u = user_from_session(request)
+    if (u or {}).get("rol") != "ENCARGADO":
+        return RedirectResponse(role_home_path((u or {}).get("rol", "")), status_code=303)
+
+    ucode = ((u or {}).get("codigo") or (u or {}).get("code") or (u or {}).get("user_code") or "").strip().upper()
+    uname = ((u or {}).get("nombre") or (u or {}).get("name") or (u or {}).get("user_name") or "").strip()
+    if not uname:
+        uname = ucode
+
+    # Validación: el encargado que registra debe existir en wom_users (FK)
+    if not ucode:
+        return RedirectResponse(
+            "/encargado/horas/add?msg=" + urllib.parse.quote("No se pudo identificar el código del encargado."),
+            status_code=303,
+        )
+    chk = db_one("select 1 as x from public.wom_users where upper(code)=upper(%s) limit 1;", (ucode,))
+    if not chk:
+        return RedirectResponse(
+            "/encargado/horas/add?msg=" + urllib.parse.quote("Tu usuario no existe en wom_users. Revisa el código del encargado."),
+            status_code=303,
+        )
 
     wcode = (worker_code or "").strip().upper()
     sala = (room_name or "").strip()
@@ -2898,73 +3008,55 @@ def horas_add_submit(
     def go(msg: str):
         return RedirectResponse("/encargado/horas/add?msg=" + urllib.parse.quote(msg), status_code=303)
 
-    if action == "entrada_now":
-        if open_row:
-            return go("Debe registrar la salida del trabajador primero.")
-        db_exec(
-            """
-            insert into public.wom_hours (worker_code, worker_name, room_name, entry_at, exit_at, recorded_by_code, recorded_by_name)
-            values (%s, %s, %s, %s, null, %s, %s);
-            """,
-            (wcode, w["name"], sala, now, ucode, uname),
-        )
-        return go("Entrada registrada correctamente.")
-
-    if action == "salida_now":
-        if not open_row:
-            return go("Debe registrar la entrada del trabajador primero.")
-        db_exec(
-            "update public.wom_hours set exit_at=%s, recorded_by_code=%s, recorded_by_name=%s where id=%s;",
-            (now, ucode, uname, open_row["id"]),
-        )
-        return go("Salida registrada correctamente.")
-
-    if action == "manual":
-        en = _parse_dt_local(entry_manual)
-        ex = _parse_dt_local(exit_manual)
-
-        if en and ex and ex < en:
-            return go("La salida no puede ser anterior a la entrada.")
-
-        if en and ex:
-            db_exec(
-                """
-                insert into public.wom_hours (worker_code, worker_name, room_name, entry_at, exit_at, recorded_by_code, recorded_by_name)
-                values (%s, %s, %s, %s, %s, %s, %s);
-                """,
-                (wcode, w["name"], sala, en, ex, ucode, uname),
-            )
-            return go("Registro manual (entrada y salida) guardado.")
-
-        if en and not ex:
+    try:
+        if action == "entrada_now":
             if open_row:
                 return go("Debe registrar la salida del trabajador primero.")
-            db_exec(
-                """
-                insert into public.wom_hours (worker_code, worker_name, room_name, entry_at, exit_at, recorded_by_code, recorded_by_name)
-                values (%s, %s, %s, %s, null, %s, %s);
-                """,
-                (wcode, w["name"], sala, en, ucode, uname),
-            )
-            return go("Entrada manual registrada correctamente.")
+            wom_hours_insert(wcode, w["name"], sala, now, None, ucode, uname)
+            return go("Entrada registrada correctamente.")
 
-        if ex and not en:
+        if action == "salida_now":
             if not open_row:
                 return go("Debe registrar la entrada del trabajador primero.")
-            entry_at = open_row.get("entry_at")
-            if entry_at:
-                entry_at = entry_at.astimezone(TZ) if entry_at.tzinfo else entry_at.replace(tzinfo=TZ)
-                if ex < entry_at:
-                    return go("La salida manual no puede ser anterior a la entrada registrada.")
-            db_exec(
-                "update public.wom_hours set exit_at=%s, recorded_by_code=%s, recorded_by_name=%s where id=%s;",
-                (ex, ucode, uname, open_row["id"]),
-            )
-            return go("Salida manual registrada correctamente.")
+            wom_hours_set_exit(int(open_row["id"]), now, ucode, uname)
+            return go("Salida registrada correctamente.")
 
-        return go("No se indicó entrada ni salida en el registro manual.")
+        if action == "manual":
+            en = _parse_dt_local(entry_manual)
+            ex = _parse_dt_local(exit_manual)
 
-    return go("Acción no reconocida.")
+            if en and ex and ex < en:
+                return go("La salida no puede ser anterior a la entrada.")
+
+            if en and ex:
+                wom_hours_insert(wcode, w["name"], sala, en, ex, ucode, uname)
+                return go("Registro manual (entrada y salida) guardado.")
+
+            if en and not ex:
+                if open_row:
+                    return go("Debe registrar la salida del trabajador primero.")
+                wom_hours_insert(wcode, w["name"], sala, en, None, ucode, uname)
+                return go("Entrada manual registrada correctamente.")
+
+            if ex and not en:
+                if not open_row:
+                    return go("Debe registrar la entrada del trabajador primero.")
+                entry_at = open_row.get("entry_at")
+                if entry_at:
+                    entry_at = entry_at.astimezone(TZ) if entry_at.tzinfo else entry_at.replace(tzinfo=TZ)
+                    if ex < entry_at:
+                        return go("La salida manual no puede ser anterior a la entrada registrada.")
+                wom_hours_set_exit(int(open_row["id"]), ex, ucode, uname)
+                return go("Salida manual registrada correctamente.")
+
+            return go("No se indicó entrada ni salida en el registro manual.")
+
+        return go("Acción no reconocida.")
+    except Exception as e:
+        # Evita pantallazo negro: mostramos error en pantalla y también queda en logs
+        print("[horas_add_submit] ERROR:", repr(e))
+        return go("Error al registrar: revisa logs o reintenta.")
+
 
 
 @app.get("/encargado/horas/consultar", response_class=HTMLResponse)
