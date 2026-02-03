@@ -22,6 +22,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import mimetypes
+import json
 from io import BytesIO
 
 # Pillow (compresión de imágenes en servidor). Si no está instalado, se mostrará un error claro al subir imágenes.
@@ -445,6 +446,72 @@ def supabase_storage_upload(bucket: str, path: str, file_bytes: bytes, content_t
     return f"{supabase_url}/storage/v1/object/public/{bucket}/{path}"
 
 
+
+
+def _supabase_creds() -> Tuple[str, str]:
+    supabase_url = (os.getenv("SUPABASE_URL", "") or "").strip().rstrip("/")
+    key = (
+        (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
+        or (os.getenv("SUPABASE_SERVICE_KEY", "") or "").strip()
+        or (os.getenv("SUPABASE_KEY", "") or "").strip()
+    )
+    if not supabase_url or not key:
+        raise RuntimeError("Falta SUPABASE_URL y/o SUPABASE_SERVICE_ROLE_KEY (o SUPABASE_KEY)")
+    return supabase_url, key
+
+
+def supabase_storage_remove(bucket: str, paths: List[str]) -> None:
+    """Elimina uno o varios objetos del bucket (por path) usando la API REST."""
+    if not paths:
+        return
+    supabase_url, key = _supabase_creds()
+    bucket = (bucket or "").strip() or "partes"
+    url = f"{supabase_url}/storage/v1/object/remove/{bucket}"
+    payload = json.dumps({"prefixes": paths}).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "apikey": key,
+        "Content-Type": "application/json",
+    }
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        body = (e.read() or b"").decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Error borrando imagen: {e.code} {e.reason} {body}")
+
+
+def cleanup_ticket_images(ticket_id: int) -> None:
+    """Borra imágenes asociadas a un parte: BD + Storage. No lanza si falla Storage."""
+    if not ticket_id:
+        return
+    bucket = (os.getenv("SUPABASE_STORAGE_BUCKET", "") or "").strip() or "partes"
+
+    # Paths en tabla nueva
+    rows = db_all("select image_path from public.wom_ticket_images where ticket_id=%s order by position asc;", (ticket_id,))
+    paths = [(r.get("image_path") or "").strip() for r in rows if (r.get("image_path") or "").strip()]
+
+    # Path legacy en wom_tickets
+    legacy = db_one("select image_path from public.wom_tickets where id=%s;", (ticket_id,))
+    if legacy and (legacy.get("image_path") or "").strip():
+        paths.append((legacy.get("image_path") or "").strip())
+
+    # Deduplicar
+    paths = list(dict.fromkeys(paths))
+
+    # Intentar borrar en Storage
+    if paths:
+        try:
+            supabase_storage_remove(bucket, paths)
+        except Exception:
+            # No rompemos flujo si falla el borrado remoto
+            pass
+
+    # Limpiar BD
+    db_exec("delete from public.wom_ticket_images where ticket_id=%s;", (ticket_id,))
+    db_exec("update public.wom_tickets set image_url=null, image_path=null where id=%s;", (ticket_id,))
+
 def sanitize_salas_selection(salas_selected: Optional[List[str]]) -> Optional[List[str]]:
     if not salas_selected:
         return None
@@ -500,7 +567,7 @@ def _query_partes_en_proceso_filtrado(
               estado_encargado,
               observaciones_encargado
             from public.wom_tickets
-            where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+            where (estado_encargado is null or estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO'))
               and room_name = any(%s)
             order by created_at desc;
         """,
@@ -522,7 +589,7 @@ def _query_partes_en_proceso_filtrado(
           estado_encargado,
           observaciones_encargado
         from public.wom_tickets
-        where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+        where (estado_encargado is null or estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO'))
         order by created_at desc;
     """
     )
@@ -1176,7 +1243,7 @@ def worker_activos(request: Request):
         """
         select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
-        where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+        where (estado_encargado is null or estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO'))
         order by created_at desc;
     """
     )
@@ -1356,7 +1423,7 @@ def jefe_en_proceso(request: Request):
         """
         select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
-        where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+        where (estado_encargado is null or estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO'))
         order by created_at desc;
     """
     )
@@ -1753,7 +1820,7 @@ def admin_pendientes(request: Request):
         """
         select referencia, created_at, created_by_name, room_name, tipo, priority, estado_encargado, visto_por_encargado
         from public.wom_tickets
-        where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+        where (estado_encargado is null or estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO'))
         order by created_at desc;
     """
     )
@@ -1896,6 +1963,10 @@ def admin_set_estado(request: Request, ref: str, estado: str = Form(...)):
     est = (estado or "").strip()
     if est in ESTADOS_ENCARGADO:
         update_ticket(ref, "estado_encargado=%s, visto_por_encargado=true", (est,))
+        if est in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO'):
+            t = ticket_por_ref(ref)
+            if t and t.get('id'):
+                cleanup_ticket_images(int(t['id']))
     return RedirectResponse(f"/parte/{ref}", status_code=303)
 
 
@@ -2110,7 +2181,7 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
             """
             select referencia, created_at, created_by_name, room_name, estado_encargado
             from public.wom_tickets
-            where estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO')
+            where (estado_encargado is null or estado_encargado not in ('TRABAJO TERMINADO/REPARADO','TRABAJO DESESTIMADO'))
             order by created_at desc;
         """
         )
@@ -2180,7 +2251,10 @@ def admin_eliminar_partes_do(request: Request, ref: str):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-    rref = (ref or "").strip().upper()
+        rref = (ref or "").strip().upper()
+    t = ticket_por_ref(rref)
+    if t and t.get('id'):
+        cleanup_ticket_images(int(t['id']))
     db_exec("delete from public.wom_tickets where referencia=%s;", (rref,))
     return RedirectResponse("/encargado/gestion_partes", status_code=303)
 
