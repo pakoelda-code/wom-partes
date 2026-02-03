@@ -8,6 +8,7 @@
 # itsdangerous
 # reportlab
 # psycopg2-binary
+# Pillow
 #
 # Variables de entorno:
 # DATABASE_URL   (Supabase Pooler, p.ej. ...pooler.supabase.com:6543/postgres)
@@ -21,6 +22,58 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import mimetypes
+from io import BytesIO
+
+# Pillow (compresión de imágenes en servidor). Si no está instalado, se mostrará un error claro al subir imágenes.
+PIL_AVAILABLE = True
+try:
+    from PIL import Image, ImageOps  # type: ignore
+except Exception:
+    PIL_AVAILABLE = False
+
+MAX_IMG_BYTES = 100 * 1024   # 100 KB por imagen final en Storage
+MAX_IMG_DIM = 1280           # máximo ancho/alto
+
+def compress_image_to_target(image_bytes: bytes, target_bytes: int = MAX_IMG_BYTES) -> bytes:
+    """Convierte la imagen a WEBP y ajusta tamaño/calidad para intentar <= target_bytes."""
+    if not PIL_AVAILABLE:
+        raise RuntimeError("Falta la dependencia Pillow en el servidor. Añade 'Pillow' a requirements.txt y redeploy.")
+    img = Image.open(BytesIO(image_bytes))
+    img = ImageOps.exif_transpose(img)
+
+    # Normaliza modo
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in getattr(img, "info", {})):
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        rgba = img.convert("RGBA")
+        bg.paste(rgba, mask=rgba.split()[-1])
+        img = bg
+    else:
+        img = img.convert("RGB")
+
+    # Reescalado
+    img.thumbnail((MAX_IMG_DIM, MAX_IMG_DIM))
+
+    last = b""
+    for quality in [80, 70, 60, 50, 40, 30, 25, 20]:
+        out = BytesIO()
+        img.save(out, format="WEBP", quality=quality, method=6)
+        data = out.getvalue()
+        last = data
+        if len(data) <= target_bytes:
+            return data
+
+    for dim in [1024, 900, 800, 700, 600]:
+        tmp = img.copy()
+        tmp.thumbnail((dim, dim))
+        for quality in [60, 50, 40, 30, 25, 20]:
+            out = BytesIO()
+            tmp.save(out, format="WEBP", quality=quality, method=6)
+            data = out.getvalue()
+            last = data
+            if len(data) <= target_bytes:
+                return data
+
+    return last
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -213,6 +266,21 @@ def ensure_schema_and_seed() -> None:
     db_exec("alter table public.wom_tickets add column if not exists priority text not null default 'MEDIO';")
     db_exec("alter table public.wom_tickets add column if not exists image_url text;")
     db_exec("alter table public.wom_tickets add column if not exists image_path text;")
+    # Tabla de imágenes por parte (hasta 3)
+    db_exec(
+        """
+    create table if not exists public.wom_ticket_images (
+      id bigserial primary key,
+      ticket_id bigint not null references public.wom_tickets(id) on delete cascade,
+      position int not null check (position between 1 and 3),
+      image_url text not null,
+      image_path text not null,
+      created_at timestamptz not null default now(),
+      unique(ticket_id, position)
+    );
+    """
+    )
+    db_exec("create index if not exists wom_ticket_images_ticket_idx on public.wom_ticket_images(ticket_id);")
     db_exec("create index if not exists wom_tickets_priority_idx on public.wom_tickets(priority);")
     db_exec(
         "create index if not exists wom_tickets_created_at_idx on public.wom_tickets(created_at desc);"
@@ -935,8 +1003,8 @@ def worker_new_form(request: Request):
           <textarea name="reparacion_usuario" id="reparacion_usuario" placeholder="Describe la reparación..."></textarea>
         </div>
 
-        <label>Imagen (opcional)</label>
-        <input type="file" name="imagen" accept="image/*"/>
+        <label>Imágenes (opcional, máx 3). Se comprimen automáticamente.</label>
+        <input type="file" name="imagenes" accept="image/*" multiple/>
 
         <div style="margin-top:12px">
           <button class="btn" type="submit">Guardar parte</button>
@@ -974,7 +1042,7 @@ def worker_new_submit(
     descripcion: str = Form(""),
     solucionado: str = Form("NO"),
     reparacion_usuario: str = Form(""),
-    imagen: UploadFile = File(None),
+    imagenes: List[UploadFile] = File([]),
 ):
     r = require_login(request)
     if r:
@@ -996,36 +1064,21 @@ def worker_new_submit(
 
     image_url = None
     image_path = None
-    if imagen is not None and getattr(imagen, "filename", ""):
-        raw = imagen.file.read()
-        if raw:
-            if len(raw) > 5 * 1024 * 1024:
-                return HTMLResponse(
-                    page("Error", "<div class='card'><h3>La imagen supera 5MB</h3><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
-                    status_code=400,
-                )
-            ext = _safe_ext(imagen.filename)
-            if not ext:
-                guessed = mimetypes.guess_extension(imagen.content_type or "")
-                ext = guessed if guessed in (".jpg", ".jpeg", ".png", ".webp") else ""
-            if not ext:
-                return HTMLResponse(
-                    page("Error", "<div class='card'><h3>Formato de imagen no permitido (usa JPG/PNG/WEBP)</h3><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
-                    status_code=400,
-                )
 
-            bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "partes")
-            ts = now_madrid().strftime("%Y%m%d_%H%M%S")
-            token = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(6))
-            image_path = f"tickets/{ref}_{ts}_{token}{ext}"
-            try:
-                image_url = supabase_storage_upload(bucket, image_path, raw, imagen.content_type or "")
-            except Exception as ex:
-                return HTMLResponse(
-                    page("Error", f"<div class='card'><h3>Error subiendo la imagen</h3><p class='muted'>{h(str(ex))}</p><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
-                    status_code=500,
-                )
+    # --- Manejo de hasta 3 imágenes (se comprimen a ~100KB y se convierten a WEBP) ---
+    files: List[UploadFile] = []
+    if imagenes:
+        for f in imagenes:
+            if f is not None and getattr(f, "filename", ""):
+                files.append(f)
 
+    if len(files) > 3:
+        return HTMLResponse(
+            page("Error", "<div class='card'><h3>Máximo 3 imágenes por parte</h3><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
+            status_code=400,
+        )
+
+    # Inserta primero el ticket para obtener ticket_id
     room = db_one("select id, name from public.wom_rooms where name=%s;", (sala_name,))
     room_id = room["id"] if room else None
 
@@ -1037,9 +1090,75 @@ def worker_new_submit(
         values
         (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, 'SIN ESTADO', '')
         on conflict (referencia) do nothing;
-    """,
-        (ref, u["codigo"], u["nombre"], room_id, sala_name, tipo_name, prio, desc, sol, rep, image_url, image_path),
+        """,
+        (ref, u["codigo"], u["nombre"], room_id, sala_name, tipo_name, prio, desc, sol, rep, None, None),
     )
+
+    ticket_row = db_one("select id from public.wom_tickets where referencia=%s;", (ref,))
+    ticket_id = ticket_row["id"] if ticket_row else None
+
+    if files and not ticket_id:
+        return HTMLResponse(
+            page("Error", "<div class='card'><h3>No se pudo obtener el ID del parte para guardar imágenes</h3><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
+            status_code=500,
+        )
+
+    if files:
+        bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "partes")
+        ts = now_madrid().strftime("%Y%m%d_%H%M%S")
+        for pos, f in enumerate(files, start=1):
+            raw = f.file.read()
+            if not raw:
+                continue
+
+            # Límite de entrada (para no reventar memoria/tiempo)
+            if len(raw) > 8 * 1024 * 1024:
+                return HTMLResponse(
+                    page("Error", "<div class='card'><h3>Una de las imágenes supera 8MB</h3><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
+                    status_code=400,
+                )
+
+            try:
+                compressed = compress_image_to_target(raw, MAX_IMG_BYTES)
+            except Exception as ex:
+                return HTMLResponse(
+                    page("Error", f"<div class='card'><h3>Error procesando la imagen</h3><p class='muted'>{h(str(ex))}</p><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
+                    status_code=500,
+                )
+
+            token = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(6))
+            image_path_i = f"tickets/{ref}_{ts}_{token}_{pos}.webp"
+            try:
+                image_url_i = supabase_storage_upload(bucket, image_path_i, compressed, "image/webp")
+            except Exception as ex:
+                return HTMLResponse(
+                    page("Error", f"<div class='card'><h3>Error subiendo la imagen</h3><p class='muted'>{h(str(ex))}</p><p><a class='btn2' href='/trabajador/nuevo'>Volver</a></p></div>"),
+                    status_code=500,
+                )
+
+            # Inserta en tabla de imágenes
+            try:
+                db_exec(
+                    """
+                    insert into public.wom_ticket_images (ticket_id, position, image_url, image_path)
+                    values (%s, %s, %s, %s)
+                    on conflict (ticket_id, position) do update set image_url=excluded.image_url, image_path=excluded.image_path;
+                    """,
+                    (ticket_id, pos, image_url_i, image_path_i),
+                )
+            except Exception:
+                pass
+
+            if pos == 1:
+                image_url = image_url_i
+                image_path = image_path_i
+
+        # Guarda la primera imagen también en wom_tickets (compatibilidad)
+        if image_url:
+            db_exec(
+                "update public.wom_tickets set image_url=%s, image_path=%s where id=%s;",
+                (image_url, image_path, ticket_id),
+            )
 
     return RedirectResponse(f"/parte/{ref}", status_code=303)
 
