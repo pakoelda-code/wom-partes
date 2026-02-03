@@ -515,9 +515,76 @@ def supabase_storage_remove(bucket: str, paths: List[str]) -> None:
         except Exception as e:
             print(f"[storage-delete-batch] Error err={e}")
 
+
+def cleanup_ticket_images(ticket_id: int) -> None:
+    """Elimina imágenes asociadas a un ticket tanto en Supabase Storage como en BD.
+    - Borra objetos por image_path (tabla wom_ticket_images y/o campos legacy en wom_tickets)
+    - Limpia tabla public.wom_ticket_images
+    - Pone image_url/image_path a NULL en public.wom_tickets
+    Esta función NUNCA debe romper el flujo (captura excepciones y loguea).
+    """
+    try:
+        tid = int(ticket_id)
+    except Exception:
+        return
+
+    bucket = (os.getenv("SUPABASE_STORAGE_BUCKET", "") or "").strip() or "partes"
+
+    paths: List[str] = []
+    try:
+        rows = db_all(
+            "select image_path from public.wom_ticket_images where ticket_id=%s order by position asc;",
+            (tid,),
+        )
+        for r in rows:
+            p = (r.get("image_path") or "").strip()
+            if p:
+                paths.append(p)
+    except Exception as e:
+        print(f"[cleanup_ticket_images] error leyendo wom_ticket_images tid={tid} err={e}")
+
+    # Fallback: columnas legacy en wom_tickets
+    try:
+        trow = db_one(
+            "select image_path, image_url from public.wom_tickets where id=%s;",
+            (tid,),
+        ) or {}
+        legacy_path = (trow.get("image_path") or "").strip()
+        if legacy_path and legacy_path not in paths:
+            paths.append(legacy_path)
+        # Si solo hay URL pero no path, intentamos derivar el path (best-effort)
+        legacy_url = (trow.get("image_url") or "").strip()
+        if legacy_url and not legacy_path:
+            # Esperamos .../storage/v1/object/public/{bucket}/{path}
+            marker = f"/storage/v1/object/public/{bucket}/"
+            if marker in legacy_url:
+                derived = legacy_url.split(marker, 1)[-1].strip()
+                if derived and derived not in paths:
+                    paths.append(derived)
+    except Exception as e:
+        print(f"[cleanup_ticket_images] error leyendo wom_tickets tid={tid} err={e}")
+
+    # Borrar en Storage
+    try:
+        if paths:
+            supabase_storage_remove(bucket, paths)
+    except Exception as e:
+        print(f"[cleanup_ticket_images] error borrando storage tid={tid} err={e}")
+
     # Limpiar BD
-    db_exec("delete from public.wom_ticket_images where ticket_id=%s;", (ticket_id,))
-    db_exec("update public.wom_tickets set image_url=null, image_path=null where id=%s;", (ticket_id,))
+    try:
+        db_exec("delete from public.wom_ticket_images where ticket_id=%s;", (tid,))
+    except Exception as e:
+        print(f"[cleanup_ticket_images] error borrando wom_ticket_images tid={tid} err={e}")
+
+    try:
+        db_exec(
+            "update public.wom_tickets set image_url=null, image_path=null where id=%s;",
+            (tid,),
+        )
+    except Exception as e:
+        print(f"[cleanup_ticket_images] error limpiando legacy wom_tickets tid={tid} err={e}")
+
 
 def sanitize_salas_selection(salas_selected: Optional[List[str]]) -> Optional[List[str]]:
     if not salas_selected:
