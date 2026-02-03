@@ -461,52 +461,59 @@ def _supabase_creds() -> Tuple[str, str]:
 
 
 def supabase_storage_remove(bucket: str, paths: List[str]) -> None:
-    """Elimina uno o varios objetos del bucket (por path) usando la API REST."""
+    """
+    Elimina uno o varios objetos del bucket (por path) usando la API REST.
+    Usamos DELETE por objeto (robusto) y, si falla, intentamos el endpoint /object/remove.
+    """
     if not paths:
         return
     supabase_url, key = _supabase_creds()
     bucket = (bucket or "").strip() or "partes"
-    url = f"{supabase_url}/storage/v1/object/remove/{bucket}"
-    payload = json.dumps({"prefixes": paths}).encode("utf-8")
+
     headers = {
         "Authorization": f"Bearer {key}",
         "apikey": key,
-        "Content-Type": "application/json",
     }
-    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            resp.read()
-    except urllib.error.HTTPError as e:
-        body = (e.read() or b"").decode("utf-8", errors="ignore")
-        raise RuntimeError(f"Error borrando imagen: {e.code} {e.reason} {body}")
 
-
-def cleanup_ticket_images(ticket_id: int) -> None:
-    """Borra imágenes asociadas a un parte: BD + Storage. No lanza si falla Storage."""
-    if not ticket_id:
-        return
-    bucket = (os.getenv("SUPABASE_STORAGE_BUCKET", "") or "").strip() or "partes"
-
-    # Paths en tabla nueva
-    rows = db_all("select image_path from public.wom_ticket_images where ticket_id=%s order by position asc;", (ticket_id,))
-    paths = [(r.get("image_path") or "").strip() for r in rows if (r.get("image_path") or "").strip()]
-
-    # Path legacy en wom_tickets
-    legacy = db_one("select image_path from public.wom_tickets where id=%s;", (ticket_id,))
-    if legacy and (legacy.get("image_path") or "").strip():
-        paths.append((legacy.get("image_path") or "").strip())
-
-    # Deduplicar
-    paths = list(dict.fromkeys(paths))
-
-    # Intentar borrar en Storage
-    if paths:
+    # 1) DELETE por cada objeto (más compatible)
+    failed: List[str] = []
+    for p in paths:
+        p = (p or "").strip()
+        if not p:
+            continue
+        # encode path pero preservando '/'
+        encoded = urllib.parse.quote(p, safe="/")
+        url = f"{supabase_url}/storage/v1/object/{bucket}/{encoded}"
+        req = urllib.request.Request(url, headers=headers, method="DELETE")
         try:
-            supabase_storage_remove(bucket, paths)
-        except Exception:
-            # No rompemos flujo si falla el borrado remoto
-            pass
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            body = (e.read() or b"").decode("utf-8", errors="ignore")
+            print(f"[storage-delete] HTTPError {e.code} {e.reason} path={p} body={body[:500]}")
+            failed.append(p)
+        except Exception as e:
+            print(f"[storage-delete] Error path={p} err={e}")
+            failed.append(p)
+
+    # 2) Fallback: endpoint remove (batch) si algo falló
+    if failed:
+        url = f"{supabase_url}/storage/v1/object/remove/{bucket}"
+        payload = json.dumps({"prefixes": failed}).encode("utf-8")
+        hdrs = {
+            "Authorization": f"Bearer {key}",
+            "apikey": key,
+            "Content-Type": "application/json",
+        }
+        req2 = urllib.request.Request(url, data=payload, headers=hdrs, method="POST")
+        try:
+            with urllib.request.urlopen(req2, timeout=30) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            body = (e.read() or b"").decode("utf-8", errors="ignore")
+            print(f"[storage-delete-batch] HTTPError {e.code} {e.reason} body={body[:500]}")
+        except Exception as e:
+            print(f"[storage-delete-batch] Error err={e}")
 
     # Limpiar BD
     db_exec("delete from public.wom_ticket_images where ticket_id=%s;", (ticket_id,))
@@ -835,6 +842,11 @@ def render_ticket_blocks(
     subtitle: str,
     show_link: bool = True,
 ) -> str:
+    """
+    Renderiza una lista de partes en formato "tarjetas".
+    Nota: aquí NO mostramos imágenes para evitar cargar Storage en listados;
+    las imágenes se ven en el detalle del parte (/parte/{ref}).
+    """
     blocks: List[str] = []
     for p in rows:
         fecha, hora = formatear_fecha_hora(p.get("created_at"))
@@ -844,19 +856,9 @@ def render_ticket_blocks(
         sol = bool(p.get("solucionado_por_usuario", False))
 
         rep = (p.get("reparacion_usuario") or "").strip()
-        if sol:
-            rep_txt = rep if rep else "(No indicó reparación)"
-        else:
-            rep_txt = "(No aplica)"
+        rep_txt = (rep if rep else "(No indicó reparación)") if sol else "(No aplica)"
 
         obs = (p.get("observaciones_encargado") or "").strip() or "(Sin observaciones)"
-    image_url = (p.get("image_url") or "").strip()
-    img_block = ""
-    if image_url:
-        img_block = (
-            f"<p><b>Imagen adjunta:</b> <a class='btn2' href='{h(image_url)}' target='_blank'>Ver imagen</a></p>"
-            f"<div style='margin-top:10px'><img src='{h(image_url)}' style='max-width:100%; border:1px solid #ddd; border-radius:12px'/></div>"
-        )
         desc = (p.get("descripcion") or "").strip() or "(Sin descripción)"
 
         header = h(ref)
@@ -872,7 +874,7 @@ def render_ticket_blocks(
             <div class="pill">Tipo: {h(p.get('tipo',''))}</div>
             <div class="pill">Creado por: {h(p.get('created_by_name',''))}</div>
             <div class="pill">Visto: {h(visto)}</div>
-            <div class="pill">Estado: {h(estado)}</div>
+            <div class="pill">Estado: {prio_span(p.get("priority"), estado)}</div>
             <div class="hr"></div>
             <p><b>Reparación realizada por el trabajador (si aplica):</b><br/>{h(rep_txt).replace(chr(10), "<br/>")}</p>
             <p><b>Observaciones del encargado:</b><br/>{h(obs).replace(chr(10), "<br/>")}</p>
@@ -928,7 +930,7 @@ def login_page(request: Request):
     body = '''
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-      <p class="muted"><i>Versión 1.5 Enero 2026</i></p>
+      <p class="muted"><i>Version 2.1 Febrero 2026</i></p>
       <form method="post" action="/login">
         <label>Código personal</label>
         <input name="codigo" placeholder="Ej: A123B" autocomplete="off"/>
@@ -938,11 +940,10 @@ def login_page(request: Request):
       </form>
 
       <p class="muted" style="margin-top:14px; font-style:italic; font-size:0.92em;">
-        *** Novedades de la Versión 1.5 ***<br/><br/>
-        - Corrección de errores de creación de formularios<br/>
-        - Ahora los trabajadores pueden filtrar por mes y año su listado de partes Finalizados<br/>
-        - Nuevas opciones de registro en el menú de encargado<br/>
-        - Corrección de arreglos en el menú de Jefes
+        *** Novedades de la Versión 2.1 ***<br/><br/>
+        - Nueva corrección de errores de creación de formularios<br/>
+        - Ahora los trabajadores pueden añadir IMÁGENES a los partes<br/>
+        - Nuevas opciones de registro en el menú de encargado y en PDFs
       </p>
     </div>
     '''
@@ -2251,10 +2252,11 @@ def admin_eliminar_partes_do(request: Request, ref: str):
     if u["rol"] != "ENCARGADO":
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
-        rref = (ref or "").strip().upper()
+    rref = (ref or "").strip().upper()
     t = ticket_por_ref(rref)
-    if t and t.get('id'):
-        cleanup_ticket_images(int(t['id']))
+    if t and t.get("id"):
+        # Borra imágenes asociadas (Storage + BD) antes de borrar el parte
+        cleanup_ticket_images(int(t["id"]))
     db_exec("delete from public.wom_tickets where referencia=%s;", (rref,))
     return RedirectResponse("/encargado/gestion_partes", status_code=303)
 
