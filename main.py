@@ -84,7 +84,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from fastapi import FastAPI, Request, Form, UploadFile, File
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 
 TZ = ZoneInfo("Europe/Madrid")
@@ -4437,6 +4437,5 @@ def jefe_inv_consulta(request: Request):
     {content}
     """
     return page("Consulta Inventario", body)
-
 
 
