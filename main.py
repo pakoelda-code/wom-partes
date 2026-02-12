@@ -200,11 +200,19 @@ def ensure_schema_and_seed() -> None:
     create table if not exists public.wom_users (
       code text primary key,
       name text not null,
-      role text not null check (role in ('TRABAJADOR','ENCARGADO','JEFE')),
+      role text not null check (role in ('TRABAJADOR','ENCARGADO','TECNICO','JEFE')),
       created_at timestamptz not null default now()
     );
     """
     )
+
+    # Migración segura de roles (añade TECNICO a la constraint)
+    db_exec_safe("alter table public.wom_users drop constraint if exists wom_users_role_check;", label="drop_role_check")
+    db_exec_safe(
+        "alter table public.wom_users add constraint wom_users_role_check check (role in ('TRABAJADOR','ENCARGADO','TECNICO','JEFE'));",
+        label="add_role_check",
+    )
+
 
     db_exec(
         """
@@ -1068,7 +1076,7 @@ def require_login(request: Request):
 
 def role_home_path(role: str) -> str:
     role = (role or "").upper()
-    if role == "ENCARGADO":
+    if role == "ENCARGADO" or role == "TECNICO":
         return "/encargado"
     if role == "JEFE":
         return "/jefe"
@@ -1182,6 +1190,7 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup():
     ensure_schema_and_seed()
+    ensure_inventory_schema()
 
 
 @app.get("/health")
@@ -2026,7 +2035,7 @@ def admin_menu(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     row = db_one(
@@ -2071,6 +2080,7 @@ def admin_menu(request: Request):
         <a class="btn" href="/encargado/gestion_partes">Gestión de Partes</a>
         <a class="btn" href="/encargado/gestion_usuarios">Gestión de Usuarios</a>
         <a class="btn" href="/encargado/horas">Control de Horas</a>
+        <a class="btn" href="/encargado/inventario">Inventario de Almacén</a>
       </div>
     </div>
     {urgente_banner}
@@ -2085,7 +2095,7 @@ def admin_pendientes(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all(
@@ -2135,7 +2145,7 @@ def admin_finalizados(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     now = now_madrid()
@@ -2216,7 +2226,7 @@ def admin_mark_visto(request: Request, ref: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     update_ticket(ref, "visto_por_encargado=true", ())
@@ -2229,7 +2239,7 @@ def admin_set_estado(request: Request, ref: str, estado: str = Form(...)):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     est = (estado or "").strip()
@@ -2249,7 +2259,7 @@ def admin_set_priority(request: Request, ref: str, priority: str = Form("MEDIO")
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     pr = (priority or "MEDIO").strip().upper()
@@ -2265,7 +2275,7 @@ def admin_set_obs(request: Request, ref: str, obs: str = Form("")):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     update_ticket(ref, "observaciones_encargado=%s, visto_por_encargado=true", ((obs or "").strip(),))
@@ -2281,7 +2291,7 @@ def admin_gestion_partes(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = """
@@ -2308,7 +2318,7 @@ def admin_visualizar_en_proceso_form(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas = get_salas()
@@ -2338,7 +2348,7 @@ def admin_visualizar_en_proceso_result(request: Request, salas: List[str] = Form
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas_filtro = sanitize_salas_selection(salas)
@@ -2361,7 +2371,7 @@ def admin_pdf_form(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas = get_salas()
@@ -2391,7 +2401,7 @@ def admin_pdf_generate(request: Request, salas: List[str] = Form([])):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas_filtro = sanitize_salas_selection(salas)
@@ -2408,7 +2418,7 @@ def admin_eliminar_partes_menu(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = """
@@ -2434,7 +2444,7 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     finalizados = (tipo or "").lower() == "finalizados"
@@ -2495,7 +2505,7 @@ def admin_eliminar_partes_confirmar(request: Request, ref: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = f"""
@@ -2520,7 +2530,7 @@ def admin_eliminar_partes_do(request: Request, ref: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rref = (ref or "").strip().upper()
@@ -2541,7 +2551,7 @@ def admin_gestion_usuarios(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = """
@@ -2568,41 +2578,83 @@ def admin_listar_usuarios(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    msg = request.query_params.get("msg", "")
 
     users = db_all("select code, name, role from public.wom_users order by role, name;")
     counts = db_all("select created_by_code as code, count(*)::int as n from public.wom_tickets group by created_by_code;")
-    count_map = { (c.get("code") or "").upper(): int(c.get("n") or 0) for c in counts }
+    count_map = {(c.get("code") or "").upper(): int(c.get("n") or 0) for c in counts}
+
+    roles = ["TRABAJADOR", "ENCARGADO", "TECNICO", "JEFE"]
 
     rows = ""
     for us in users:
         code = (us.get("code") or "").strip()
         n = count_map.get(code.upper(), 0)
-        rows += f'''
+        cur_role = (us.get("role") or "").upper()
+        opts = ""
+        for rname in roles:
+            sel = "selected" if rname == cur_role else ""
+            opts += f'<option value="{rname}" {sel}>{rname}</option>'
+        rows += f"""
         <tr>
           <td>{h(code)}</td>
           <td>{h(us.get("name",""))}</td>
-          <td>{h(us.get("role",""))}</td>
+          <td>
+            <form method="post" action="/encargado/usuarios/cambiar_rol" style="display:flex; gap:8px; align-items:center; margin:0;">
+              <input type="hidden" name="code" value="{h(code)}"/>
+              <select name="role">{opts}</select>
+              <button class="btn2" type="submit">Guardar</button>
+            </form>
+          </td>
           <td style="text-align:right">{n}</td>
         </tr>
-        '''
+        """
 
-    body = f'''
+    body = f"""
     <div class="top">
       <div><h2>Usuarios del sistema</h2></div>
       <div><a class="btn2" href="/encargado/gestion_usuarios">Volver</a></div>
     </div>
 
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+
     <div class="card">
       <table>
-        <thead><tr><th>Código</th><th>Nombre</th><th>Rol</th><th>Partes emitidos</th></tr></thead>
+        <thead><tr><th>Código</th><th>Nombre</th><th>Rol (editable)</th><th>Partes emitidos</th></tr></thead>
         <tbody>{rows or "<tr><td colspan='4'>No hay usuarios.</td></tr>"}</tbody>
       </table>
+      <p style="margin-top:10px; font-size:12px; opacity:0.9;">
+        Nota: por seguridad, no se permite cambiar tu propio rol a uno distinto de ENCARGADO/TECNICO desde aquí.
+      </p>
     </div>
-    '''
+    """
     return page("Listar Usuarios", body)
 
+
+@app.post("/encargado/usuarios/cambiar_rol")
+def admin_cambiar_rol(request: Request, code: str = Form(...), role: str = Form(...)):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    code = (code or "").strip().upper()
+    role = (role or "").strip().upper()
+
+    allowed = {"TRABAJADOR", "ENCARGADO", "TECNICO", "JEFE"}
+    if role not in allowed:
+        return RedirectResponse('/encargado/usuarios/listar?msg=Rol%20no%20válido', status_code=303)
+
+    if code == (u.get("codigo") or "").strip().upper() and role not in {"ENCARGADO","TECNICO"}:
+        return RedirectResponse('/encargado/usuarios/listar?msg=No%20puedes%20cambiar%20tu%20propio%20rol%20a%20uno%20no%20administrador', status_code=303)
+
+    db_exec_safe("update public.wom_users set role=%s where code=%s;", (role, code), label="update_user_role")
+    return RedirectResponse('/encargado/usuarios/listar?msg=Rol%20actualizado', status_code=303)
 
 
 @app.get("/encargado/usuarios/crear", response_class=HTMLResponse)
@@ -2611,7 +2663,7 @@ def admin_crear_usuario_form(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = """
@@ -2655,7 +2707,7 @@ def admin_crear_usuario_do(
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     c = (codigo or "").strip().upper()
@@ -2691,7 +2743,7 @@ def admin_eliminar_usuario_lista(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     users = db_all("select code, name, role from public.wom_users order by role, name;")
@@ -2732,7 +2784,7 @@ def admin_eliminar_usuario_confirmar(request: Request, code: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     code = (code or "").strip().upper()
@@ -2772,7 +2824,7 @@ def admin_eliminar_usuario_confirmar_post(request: Request, code: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     code = (code or "").strip().upper()
@@ -2794,7 +2846,7 @@ def admin_salas(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas = get_salas()
@@ -2832,7 +2884,7 @@ def admin_salas_add(request: Request, sala: str = Form(...)):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "ENCARGADO":
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     s = (sala or "").strip()
@@ -3343,3 +3395,1048 @@ def horas_pdf_generate(
 
     doc.build(story)
     return FileResponse(str(out_path), media_type="application/pdf", filename=out_path.name)
+# =========================
+# INVENTARIO DE ALMACÉN
+# =========================
+
+INV_CATEGORIES = [
+    ("Electronica", "E"),
+    ("Ferretería", "F"),
+    ("Papelería", "P"),
+    ("Atrezzo y Decoración", "A"),
+    ("Varios", "V"),
+]
+
+def inv_category_prefix(cat: str) -> str:
+    for name, pref in INV_CATEGORIES:
+        if name == cat:
+            return pref
+    return "V"
+
+def ensure_inventory_schema() -> None:
+    # Ubicaciones
+    db_exec(
+        '''
+        create table if not exists public.wom_inv_locations (
+          id bigserial primary key,
+          name text not null unique,
+          active boolean not null default true,
+          created_at timestamptz not null default now()
+        );
+        '''
+    )
+
+    # Items
+    db_exec(
+        '''
+        create table if not exists public.wom_inv_items (
+          id bigserial primary key,
+          code text not null unique,
+          category text not null,
+          description text not null,
+          location_id bigint references public.wom_inv_locations(id),
+          stock integer not null default 0,
+          active boolean not null default true,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+        '''
+    )
+    db_exec_safe("create index if not exists wom_inv_items_desc_idx on public.wom_inv_items (description);", label="inv_items_desc_idx")
+    db_exec_safe("create index if not exists wom_inv_items_loc_idx on public.wom_inv_items (location_id);", label="inv_items_loc_idx")
+
+    # Movimientos
+    db_exec(
+        '''
+        create table if not exists public.wom_inv_moves (
+          id bigserial primary key,
+          item_id bigint not null references public.wom_inv_items(id) on delete cascade,
+          move_type text not null check (move_type in ('ENTRADA','SALIDA')),
+          qty integer not null check (qty > 0),
+          created_at timestamptz not null default now(),
+          user_code text,
+          user_name text
+        );
+        '''
+    )
+    db_exec_safe("create index if not exists wom_inv_moves_created_idx on public.wom_inv_moves (created_at);", label="inv_moves_created_idx")
+    db_exec_safe("create index if not exists wom_inv_moves_item_idx on public.wom_inv_moves (item_id);", label="inv_moves_item_idx")
+
+    # Seed ubicaciones Caja 1..20 si no hay ninguna
+    row = db_one("select count(*)::int as n from public.wom_inv_locations;")
+    n = int((row or {}).get("n") or 0)
+    if n == 0:
+        for i in range(1, 21):
+            db_exec_safe("insert into public.wom_inv_locations(name, active) values (%s, true);", (f"Caja {i}",), label=f"seed_loc_{i}")
+
+
+@app.get("/encargado/inventario", response_class=HTMLResponse)
+def inv_menu(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    body = f"""
+    <div class="top">
+      <div><h2>Inventario de Almacén</h2></div>
+      <div><a class="btn2" href="/encargado">Volver</a></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <a class="btn" href="/encargado/inventario/add_item">Añadir Artículo</a>
+        <a class="btn" href="/encargado/inventario/mov">Entradas y Salidas</a>
+        <a class="btn" href="/encargado/inventario/consulta">Consulta de Inventario</a>
+        <a class="btn" href="/encargado/inventario/gestion">Gestión de Inventario</a>
+      </div>
+    </div>
+    """
+    return page("Inventario", body)
+
+
+def inv_locations_options(selected_id: Optional[int] = None, include_all: bool = False) -> str:
+    locs = db_all("select id, name from public.wom_inv_locations where active=true order by name;")
+    opts = ""
+    if include_all:
+        opts += f'<option value="ALL" {"selected" if selected_id is None else ""}>TODAS</option>'
+    for l in locs:
+        lid = int(l.get("id"))
+        sel = "selected" if selected_id == lid else ""
+        opts += f'<option value="{lid}" {sel}>{h(l.get("name",""))}</option>'
+    return opts
+
+def inv_category_options(selected: Optional[str] = None) -> str:
+    opts = ""
+    for name, _ in INV_CATEGORIES:
+        sel = "selected" if selected == name else ""
+        opts += f'<option value="{h(name)}" {sel}>{h(name)}</option>'
+    return opts
+
+
+@app.get("/encargado/inventario/add_item", response_class=HTMLResponse)
+def inv_add_item_form(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    msg = request.query_params.get("msg","")
+    body = f"""
+    <div class="top">
+      <div><h2>Añadir Artículo</h2></div>
+      <div><a class="btn2" href="/encargado/inventario">Volver</a></div>
+    </div>
+
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+
+    <div class="card">
+      <form method="post" action="/encargado/inventario/add_item">
+        <div class="grid2">
+          <div>
+            <label>Categoría</label>
+            <select name="category" required>
+              {inv_category_options()}
+            </select>
+          </div>
+          <div>
+            <label>Ubicación</label>
+            <select name="location_id" required>
+              {inv_locations_options()}
+            </select>
+          </div>
+          <div style="grid-column:1 / -1;">
+            <label>Descripción (nombre del artículo)</label>
+            <input name="description" required />
+          </div>
+          <div>
+            <label>Cantidad inicial</label>
+            <input name="qty" type="number" min="0" step="1" value="0" required />
+          </div>
+        </div>
+        <div style="margin-top:12px;">
+          <button class="btn" type="submit">Crear Artículo</button>
+        </div>
+      </form>
+    </div>
+    """
+    return page("Añadir Artículo", body)
+
+
+def inv_generate_next_code(category: str) -> str:
+    pref = inv_category_prefix(category)
+    row = db_one("select code from public.wom_inv_items where code like %s order by code desc limit 1;", (f"{pref}-%",))
+    last = (row or {}).get("code") if row else None
+    n = 0
+    if last and isinstance(last, str) and "-" in last:
+        try:
+            n = int(last.split("-")[1])
+        except Exception:
+            n = 0
+    return f"{pref}-{n+1:04d}"
+
+
+@app.post("/encargado/inventario/add_item")
+def inv_add_item_submit(
+    request: Request,
+    category: str = Form(...),
+    location_id: int = Form(...),
+    description: str = Form(...),
+    qty: int = Form(...),
+):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    category = (category or "").strip()
+    description = (description or "").strip()
+    qty = int(qty or 0)
+    if qty < 0:
+        qty = 0
+
+    code = inv_generate_next_code(category)
+    try:
+        db_exec(
+            "insert into public.wom_inv_items(code, category, description, location_id, stock, active) values (%s,%s,%s,%s,%s,true);",
+            (code, category, description, int(location_id), qty),
+        )
+    except Exception:
+        code = inv_generate_next_code(category)
+        db_exec(
+            "insert into public.wom_inv_items(code, category, description, location_id, stock, active) values (%s,%s,%s,%s,%s,true);",
+            (code, category, description, int(location_id), qty),
+        )
+
+    return RedirectResponse(f"/encargado/inventario/add_item?msg=Articulo%20creado%20correctamente%20con%20código%20{code}", status_code=303)
+
+
+def inv_search_items(q: str, include_inactive: bool = False, limit: int = 20) -> List[Dict[str, Any]]:
+    q = (q or "").strip()
+    if not q:
+        return []
+    if include_inactive:
+        return db_all(
+            "select i.id,i.code,i.description,i.category,i.stock,i.active,l.name as location from public.wom_inv_items i left join public.wom_inv_locations l on l.id=i.location_id where lower(i.description) like lower(%s) order by i.active desc, i.description limit %s;",
+            (f"%{q}%", int(limit)),
+        )
+    return db_all(
+        "select i.id,i.code,i.description,i.category,i.stock,i.active,l.name as location from public.wom_inv_items i left join public.wom_inv_locations l on l.id=i.location_id where i.active=true and lower(i.description) like lower(%s) order by i.description limit %s;",
+        (f"%{q}%", int(limit)),
+    )
+
+
+@app.get("/encargado/inventario/mov", response_class=HTMLResponse)
+def inv_mov_form(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    q = request.query_params.get("q","")
+    item_id = request.query_params.get("item_id","")
+    msg = request.query_params.get("msg","")
+
+    results = inv_search_items(q) if q else []
+    item = None
+    if item_id:
+        item = db_one(
+            "select i.id,i.code,i.description,i.category,i.stock,i.location_id,l.name as location from public.wom_inv_items i left join public.wom_inv_locations l on l.id=i.location_id where i.id=%s;",
+            (int(item_id),),
+        )
+
+    res_html = ""
+    if results:
+        res_html += "<div class='card'><b>Resultados:</b><ul>"
+        for it in results:
+            res_html += f"<li><a href='/encargado/inventario/mov?item_id={int(it['id'])}'>{h(it.get('description',''))}</a> ({h(it.get('code',''))})</li>"
+        res_html += "</ul></div>"
+
+    item_block = ""
+    if item:
+        item_block = f"""
+        <div class="card">
+          <h3>{h(item.get("description",""))} <span style="opacity:.7">({h(item.get("code",""))})</span></h3>
+          <p><b>Categoría:</b> {h(item.get("category",""))} &nbsp; | &nbsp; <b>Ubicación:</b> {h(item.get("location",""))}</p>
+          <p><b>Stock actual:</b> <span style="font-size:18px">{int(item.get("stock") or 0)}</span></p>
+
+          <form method="post" action="/encargado/inventario/mov">
+            <input type="hidden" name="item_id" value="{int(item['id'])}"/>
+            <div class="grid2">
+              <div>
+                <label>Tipo</label>
+                <select name="move_type" required>
+                  <option value="ENTRADA">ENTRADA</option>
+                  <option value="SALIDA">SALIDA</option>
+                </select>
+              </div>
+              <div>
+                <label>Cantidad</label>
+                <input name="qty" type="number" min="1" step="1" required />
+              </div>
+            </div>
+            <div style="margin-top:12px;">
+              <button class="btn" type="submit">Registrar</button>
+            </div>
+          </form>
+        </div>
+        """
+
+    body = f"""
+    <div class="top">
+      <div><h2>Entradas y Salidas</h2></div>
+      <div><a class="btn2" href="/encargado/inventario">Volver</a></div>
+    </div>
+
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+
+    <div class="card">
+      <form method="get" action="/encargado/inventario/mov">
+        <label>Buscar artículo por descripción</label>
+        <div class="row">
+          <input name="q" value="{h(q)}" placeholder="Ej: relé, tornillo, cinta..." />
+          <button class="btn2" type="submit">Buscar</button>
+        </div>
+      </form>
+    </div>
+
+    {res_html}
+    {item_block}
+    """
+    return page("Movimientos", body)
+
+
+@app.post("/encargado/inventario/mov")
+def inv_mov_submit(
+    request: Request,
+    item_id: int = Form(...),
+    move_type: str = Form(...),
+    qty: int = Form(...),
+):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    move_type = (move_type or "").strip().upper()
+    qty = int(qty or 0)
+    if move_type not in ("ENTRADA","SALIDA") or qty <= 0:
+        return RedirectResponse("/encargado/inventario/mov?msg=Datos%20no%20válidos", status_code=303)
+
+    conn = get_conn()
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("select id, stock from public.wom_inv_items where id=%s for update;", (int(item_id),))
+                row = cur.fetchone()
+                if not row:
+                    raise Exception("Artículo no encontrado")
+                stock = int(row.get("stock") or 0)
+                if move_type == "SALIDA" and stock - qty < 0:
+                    raise Exception("No hay stock suficiente")
+
+                new_stock = stock + qty if move_type == "ENTRADA" else stock - qty
+                cur.execute("update public.wom_inv_items set stock=%s, updated_at=now() where id=%s;", (new_stock, int(item_id)))
+                ucode = (u.get("codigo") or "").strip().upper()
+                uname = (u.get("nombre") or "").strip()
+                cur.execute(
+                    "insert into public.wom_inv_moves(item_id, move_type, qty, user_code, user_name) values (%s,%s,%s,%s,%s);",
+                    (int(item_id), move_type, qty, ucode, uname),
+                )
+        return RedirectResponse(f"/encargado/inventario/mov?item_id={int(item_id)}&msg=Movimiento%20registrado", status_code=303)
+    except Exception as e:
+        return RedirectResponse(f"/encargado/inventario/mov?item_id={int(item_id)}&msg={quote(str(e))}", status_code=303)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.get("/encargado/inventario/consulta", response_class=HTMLResponse)
+def inv_consulta(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    mode = request.query_params.get("mode","articulo")
+    q = request.query_params.get("q","")
+    loc = request.query_params.get("loc","")
+    msg = request.query_params.get("msg","")
+
+    content = ""
+    if mode == "articulo" and q:
+        res = inv_search_items(q)
+        if not res:
+            content = "<div class='card'>No se encontraron artículos.</div>"
+        else:
+            lis = ""
+            for it in res:
+                lis += f"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b> — {h(it.get('location',''))}</li>"
+            content = f"<div class='card'><ul>{lis}</ul></div>"
+    elif mode == "ubicacion" and loc and loc != "ALL":
+        rows = db_all(
+            "select i.code,i.description,i.category,i.stock,l.name as location from public.wom_inv_items i join public.wom_inv_locations l on l.id=i.location_id where i.active=true and l.id=%s order by i.description;",
+            (int(loc),),
+        )
+        if not rows:
+            content = "<div class='card'>No hay artículos en esa ubicación.</div>"
+        else:
+            trs = ""
+            for it in rows:
+                trs += f"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}</td></tr>"
+            content = f"""
+            <div class="card">
+              <table>
+                <thead><tr><th>Código</th><th>Artículo</th><th style='text-align:right'>Stock</th></tr></thead>
+                <tbody>{trs}</tbody>
+              </table>
+            </div>
+            """
+    elif mode == "ubicacion" and loc == "ALL":
+        rows = db_all(
+            "select l.name as location, i.code,i.description,i.stock from public.wom_inv_items i join public.wom_inv_locations l on l.id=i.location_id where i.active=true order by l.name, i.description;",
+        )
+        if not rows:
+            content = "<div class='card'>No hay artículos.</div>"
+        else:
+            trs = ""
+            for it in rows:
+                trs += f"<tr><td>{h(it.get('location',''))}</td><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}</td></tr>"
+            content = f"""
+            <div class="card">
+              <table>
+                <thead><tr><th>Ubicación</th><th>Código</th><th>Artículo</th><th style='text-align:right'>Stock</th></tr></thead>
+                <tbody>{trs}</tbody>
+              </table>
+            </div>
+            """
+
+    pdf_btn = ""
+    if mode == "ubicacion" and loc:
+        pdf_btn = f"<a class='btn2' style='margin-left:8px' href='/encargado/inventario/consulta_pdf?loc={h(loc)}'>Generar PDF por ubicación</a>"
+
+    body = f"""
+    <div class="top">
+      <div><h2>Consulta de Inventario</h2></div>
+      <div><a class="btn2" href="/encargado/inventario">Volver</a></div>
+    </div>
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+
+    <div class="card">
+      <div class="row" style="gap:10px; flex-wrap:wrap;">
+        <a class="btn2" href="/encargado/inventario/consulta?mode=articulo">Consulta por artículo</a>
+        <a class="btn2" href="/encargado/inventario/consulta?mode=ubicacion">Consulta por ubicación</a>
+      </div>
+      <hr/>
+      <form method="get" action="/encargado/inventario/consulta">
+        <input type="hidden" name="mode" value="{h(mode)}"/>
+        {"<label>Buscar por descripción</label><input name='q' value='"+h(q)+"'/>" if mode=="articulo" else ""}
+        {"<label>Ubicación</label><select name='loc'>"+inv_locations_options(int(loc) if loc and loc.isdigit() else None, include_all=True)+"</select>" if mode=="ubicacion" else ""}
+        <div style="margin-top:10px;">
+          <button class="btn" type="submit">Consultar</button>
+          {pdf_btn}
+        </div>
+      </form>
+    </div>
+
+    {content}
+    """
+    return page("Consulta Inventario", body)
+
+
+@app.get("/encargado/inventario/consulta_pdf")
+def inv_consulta_pdf(request: Request, loc: str = "ALL"):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    loc_name = "TODAS"
+    if loc and loc != "ALL":
+        loc_row = db_one("select name from public.wom_inv_locations where id=%s;", (int(loc),))
+        loc_name = (loc_row or {}).get("name") or "Ubicación"
+        rows = db_all(
+            "select code, description, stock from public.wom_inv_items where active=true and location_id=%s order by description;",
+            (int(loc),),
+        )
+    else:
+        rows = db_all(
+            "select l.name as location, i.code,i.description,i.stock from public.wom_inv_items i join public.wom_inv_locations l on l.id=i.location_id where i.active=true order by l.name, i.description;",
+        )
+
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, hhh = A4
+
+    y = hhh - 20*mm
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(20*mm, y, "INVENTARIO POR UBICACIÓN")
+    y -= 10*mm
+    c.setFont("Helvetica", 11)
+    c.drawString(20*mm, y, f"Ubicación: {loc_name}")
+    y -= 6*mm
+    c.drawString(20*mm, y, f"Fecha de generación: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    y -= 10*mm
+
+    c.setFont("Courier", 8)
+
+    if loc and loc != "ALL":
+        c.drawString(20*mm, y, "CÓDIGO     STOCK   ARTÍCULO")
+        y -= 5*mm
+        c.line(20*mm, y, w-20*mm, y)
+        y -= 5*mm
+        for it in rows:
+            line = f"{(it.get('code') or ''):10} {(int(it.get('stock') or 0)):5}  {(it.get('description') or '')}"
+            c.drawString(20*mm, y, line[:110])
+            y -= 4*mm
+            if y < 20*mm:
+                c.showPage()
+                y = hhh - 20*mm
+                c.setFont("Courier", 8)
+    else:
+        c.drawString(20*mm, y, "UBICACIÓN           CÓDIGO     STOCK   ARTÍCULO")
+        y -= 5*mm
+        c.line(20*mm, y, w-20*mm, y)
+        y -= 5*mm
+        for it in rows:
+            line = f"{(it.get('location') or ''):18} {(it.get('code') or ''):10} {(int(it.get('stock') or 0)):5}  {(it.get('description') or '')}"
+            c.drawString(20*mm, y, line[:110])
+            y -= 4*mm
+            if y < 20*mm:
+                c.showPage()
+                y = hhh - 20*mm
+                c.setFont("Courier", 8)
+
+    c.save()
+    pdf = buf.getvalue()
+    headers = {"Content-Disposition": f'attachment; filename="inventario_{loc_name}.pdf"'}
+    return Response(content=pdf, media_type="application/pdf", headers=headers)
+
+
+@app.get("/encargado/inventario/gestion", response_class=HTMLResponse)
+def inv_gestion_menu(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    msg = request.query_params.get("msg","")
+    body = f"""
+    <div class="top">
+      <div><h2>Gestión de Inventario</h2></div>
+      <div><a class="btn2" href="/encargado/inventario">Volver</a></div>
+    </div>
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+    <div class="card">
+      <div class="row">
+        <a class="btn danger" href="/encargado/inventario/gestion/eliminar">Eliminar un artículo</a>
+        <a class="btn" href="/encargado/inventario/gestion/ubicaciones">Añadir o Eliminar Ubicaciones</a>
+        <a class="btn" href="/encargado/inventario/gestion/moves">Consulta listado Entradas y Salidas</a>
+        <a class="btn" href="/encargado/inventario/gestion/moves_pdf">Generar PDF Entradas y Salidas</a>
+        <a class="btn" href="/encargado/inventario/gestion/cambiar_ubicacion">Cambio de ubicación de artículo</a>
+      </div>
+    </div>
+    """
+    return page("Gestión Inventario", body)
+
+
+@app.get("/encargado/inventario/gestion/eliminar", response_class=HTMLResponse)
+def inv_eliminar_form(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse("/encargado/inventario/gestion?msg=Solo%20Encargado%20puede%20eliminar%20artículos", status_code=303)
+
+    q = request.query_params.get("q","")
+    msg = request.query_params.get("msg","")
+    res = inv_search_items(q, include_inactive=True) if q else []
+    items = ""
+    if res:
+        for it in res:
+            if not it.get("active"):
+                continue
+            items += f"<li>{h(it.get('description',''))} ({h(it.get('code',''))}) <a class='btn2 danger' href='/encargado/inventario/gestion/eliminar_confirm?id={int(it['id'])}'>Eliminar</a></li>"
+    body = f"""
+    <div class="top">
+      <div><h2>Eliminar artículo</h2></div>
+      <div><a class="btn2" href="/encargado/inventario/gestion">Volver</a></div>
+    </div>
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+    <div class="card">
+      <form method="get">
+        <label>Buscar por descripción</label>
+        <div class="row">
+          <input name="q" value="{h(q)}"/>
+          <button class="btn2" type="submit">Buscar</button>
+        </div>
+      </form>
+    </div>
+    <div class="card"><ul>{items or "<li>No hay resultados.</li>"}</ul></div>
+    """
+    return page("Eliminar artículo", body)
+
+
+@app.get("/encargado/inventario/gestion/eliminar_confirm", response_class=HTMLResponse)
+def inv_eliminar_confirm(request: Request, id: int):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    it = db_one("select id, code, description from public.wom_inv_items where id=%s;", (int(id),))
+    if not it:
+        return RedirectResponse("/encargado/inventario/gestion/eliminar?msg=No%20encontrado", status_code=303)
+
+    body = f"""
+    <div class="top">
+      <div><h2>Confirmar eliminación</h2></div>
+      <div><a class="btn2" href="/encargado/inventario/gestion/eliminar">Volver</a></div>
+    </div>
+    <div class="card">
+      <p>Vas a eliminar (desactivar) el artículo:</p>
+      <p><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))})</p>
+      <form method="post" action="/encargado/inventario/gestion/eliminar_confirm">
+        <input type="hidden" name="id" value="{int(id)}"/>
+        <button class="btn danger" type="submit">Eliminar</button>
+      </form>
+    </div>
+    """
+    return page("Eliminar artículo", body)
+
+
+@app.post("/encargado/inventario/gestion/eliminar_confirm")
+def inv_eliminar_do(request: Request, id: int = Form(...)):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "ENCARGADO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    db_exec_safe("update public.wom_inv_items set active=false, updated_at=now() where id=%s;", (int(id),), label="inv_soft_delete")
+    return RedirectResponse("/encargado/inventario/gestion/eliminar?msg=Artículo%20eliminado", status_code=303)
+
+
+@app.get("/encargado/inventario/gestion/ubicaciones", response_class=HTMLResponse)
+def inv_locations_manage(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    msg = request.query_params.get("msg","")
+    locs = db_all("select id,name,active from public.wom_inv_locations order by id;")
+    lis = ""
+    for l in locs:
+        status = "✅" if l.get("active") else "⛔"
+        btn = ""
+        if l.get("active"):
+            btn = f"<a class='btn2 danger' href='/encargado/inventario/gestion/ubicaciones/delete?id={int(l['id'])}'>Eliminar</a>"
+        lis += f"<li>{status} {h(l.get('name',''))} {btn}</li>"
+
+    body = f"""
+    <div class="top">
+      <div><h2>Ubicaciones</h2></div>
+      <div><a class="btn2" href="/encargado/inventario/gestion">Volver</a></div>
+    </div>
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+    <div class="card">
+      <form method="post" action="/encargado/inventario/gestion/ubicaciones/add">
+        <label>Nueva ubicación</label>
+        <div class="row">
+          <input name="name" placeholder="Ej: Estantería 1" required/>
+          <button class="btn2" type="submit">Añadir</button>
+        </div>
+      </form>
+    </div>
+    <div class="card"><ul>{lis}</ul></div>
+    """
+    return page("Ubicaciones", body)
+
+
+@app.post("/encargado/inventario/gestion/ubicaciones/add")
+def inv_locations_add(request: Request, name: str = Form(...)):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    name = (name or "").strip()
+    if not name:
+        return RedirectResponse("/encargado/inventario/gestion/ubicaciones?msg=Nombre%20vacío", status_code=303)
+    db_exec_safe("insert into public.wom_inv_locations(name, active) values (%s, true) on conflict (name) do update set active=true;", (name,), label="inv_add_loc")
+    return RedirectResponse("/encargado/inventario/gestion/ubicaciones?msg=Ubicación%20añadida", status_code=303)
+
+
+@app.get("/encargado/inventario/gestion/ubicaciones/delete")
+def inv_locations_delete(request: Request, id: int):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    row = db_one("select count(*)::int as n from public.wom_inv_items where active=true and location_id=%s;", (int(id),))
+    n = int((row or {}).get("n") or 0)
+    if n > 0:
+        return RedirectResponse("/encargado/inventario/gestion/ubicaciones?msg=No%20se%20puede%20eliminar:%20hay%20artículos%20en%20esa%20ubicación", status_code=303)
+    db_exec_safe("update public.wom_inv_locations set active=false where id=%s;", (int(id),), label="inv_del_loc")
+    return RedirectResponse("/encargado/inventario/gestion/ubicaciones?msg=Ubicación%20eliminada", status_code=303)
+
+
+@app.get("/encargado/inventario/gestion/moves", response_class=HTMLResponse)
+def inv_moves_list(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    mes = int(request.query_params.get("mes") or datetime.now().month)
+    anio = int(request.query_params.get("anio") or datetime.now().year)
+
+    rows = db_all(
+        '''
+        select m.created_at, m.move_type, m.qty, m.user_name, i.code, i.description, l.name as location
+        from public.wom_inv_moves m
+        join public.wom_inv_items i on i.id=m.item_id
+        left join public.wom_inv_locations l on l.id=i.location_id
+        where extract(month from m.created_at)= %s and extract(year from m.created_at)= %s
+        order by m.created_at desc;
+        ''',
+        (mes, anio),
+    )
+
+    trs = ""
+    for rrr in rows:
+        dt = rrr.get("created_at")
+        if isinstance(dt, datetime):
+            dts = dt.strftime("%d/%m/%Y %H:%M")
+        else:
+            dts = str(dt)
+        trs += f"<tr><td>{h(dts)}</td><td>{h(rrr.get('move_type',''))}</td><td style='text-align:right'>{int(rrr.get('qty') or 0)}</td><td>{h(rrr.get('code',''))}</td><td>{h(rrr.get('description',''))}</td><td>{h(rrr.get('location',''))}</td><td>{h(rrr.get('user_name',''))}</td></tr>"
+
+    body = f"""
+    <div class="top">
+      <div><h2>Entradas/Salidas - Listado</h2></div>
+      <div><a class="btn2" href="/encargado/inventario/gestion">Volver</a></div>
+    </div>
+    <div class="card">
+      <form method="get">
+        <div class="grid2">
+          <div><label>Mes</label><input type="number" name="mes" min="1" max="12" value="{mes}"/></div>
+          <div><label>Año</label><input type="number" name="anio" min="2020" max="2100" value="{anio}"/></div>
+        </div>
+        <div style="margin-top:10px;"><button class="btn2" type="submit">Filtrar</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>Fecha</th><th>Tipo</th><th>Cant.</th><th>Código</th><th>Artículo</th><th>Ubicación</th><th>Usuario</th></tr></thead>
+        <tbody>{trs or "<tr><td colspan='7'>No hay movimientos.</td></tr>"}</tbody>
+      </table>
+    </div>
+    """
+    return page("Movimientos inventario", body)
+
+
+@app.get("/encargado/inventario/gestion/moves_pdf", response_class=HTMLResponse)
+def inv_moves_pdf_form(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    mes = int(request.query_params.get("mes") or datetime.now().month)
+    anio = int(request.query_params.get("anio") or datetime.now().year)
+
+    body = f"""
+    <div class="top">
+      <div><h2>PDF Entradas/Salidas</h2></div>
+      <div><a class="btn2" href="/encargado/inventario/gestion">Volver</a></div>
+    </div>
+    <div class="card">
+      <form method="get" action="/encargado/inventario/gestion/moves_pdf_download">
+        <div class="grid2">
+          <div><label>Mes</label><input type="number" name="mes" min="1" max="12" value="{mes}"/></div>
+          <div><label>Año</label><input type="number" name="anio" min="2020" max="2100" value="{anio}"/></div>
+        </div>
+        <div style="margin-top:10px;"><button class="btn" type="submit">Generar PDF</button></div>
+      </form>
+    </div>
+    """
+    return page("PDF Movimientos", body)
+
+
+@app.get("/encargado/inventario/gestion/moves_pdf_download")
+def inv_moves_pdf_download(request: Request, mes: int, anio: int):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    rows = db_all(
+        '''
+        select m.created_at, m.move_type, m.qty, m.user_name, i.code, i.description, l.name as location
+        from public.wom_inv_moves m
+        join public.wom_inv_items i on i.id=m.item_id
+        left join public.wom_inv_locations l on l.id=i.location_id
+        where extract(month from m.created_at)= %s and extract(year from m.created_at)= %s
+        order by m.created_at desc;
+        ''',
+        (int(mes), int(anio)),
+    )
+
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    W, H = A4
+
+    y = H - 20*mm
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(20*mm, y, "ENTRADAS Y SALIDAS - INVENTARIO")
+    y -= 10*mm
+    c.setFont("Helvetica", 11)
+    c.drawString(20*mm, y, f"Mes/Año: {int(mes):02d}/{int(anio)}")
+    y -= 6*mm
+    c.drawString(20*mm, y, f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    y -= 10*mm
+
+    c.setFont("Courier", 7)
+    c.drawString(20*mm, y, "FECHA            TIPO   CANT  CÓDIGO     UBICACIÓN          ARTÍCULO")
+    y -= 4*mm
+    c.line(20*mm, y, W-20*mm, y)
+    y -= 5*mm
+
+    for rrr in rows:
+        dt = rrr.get("created_at")
+        if isinstance(dt, datetime):
+            dts = dt.strftime("%d/%m/%Y %H:%M")
+        else:
+            dts = str(dt)[:16]
+        line = f"{dts:16} {rrr.get('move_type','')[:6]:6} {int(rrr.get('qty') or 0):4} {(rrr.get('code') or ''):10} {(rrr.get('location') or ''):16} {(rrr.get('description') or '')}"
+        c.drawString(20*mm, y, line[:120])
+        y -= 3.8*mm
+        if y < 20*mm:
+            c.showPage()
+            y = H - 20*mm
+            c.setFont("Courier", 7)
+
+    c.save()
+    pdf = buf.getvalue()
+    headers = {"Content-Disposition": f'attachment; filename="movimientos_inventario_{int(mes):02d}_{int(anio)}.pdf"'}
+    return Response(content=pdf, media_type="application/pdf", headers=headers)
+
+
+@app.get("/encargado/inventario/gestion/cambiar_ubicacion", response_class=HTMLResponse)
+def inv_change_loc_form(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    q = request.query_params.get("q","")
+    item_id = request.query_params.get("item_id","")
+    msg = request.query_params.get("msg","")
+    results = inv_search_items(q) if q else []
+    item = None
+    if item_id:
+        item = db_one("select i.id,i.code,i.description,i.location_id,l.name as location from public.wom_inv_items i left join public.wom_inv_locations l on l.id=i.location_id where i.id=%s;", (int(item_id),))
+
+    res_html = ""
+    if results:
+        res_html += "<div class='card'><b>Resultados:</b><ul>"
+        for it in results:
+            res_html += f"<li><a href='/encargado/inventario/gestion/cambiar_ubicacion?item_id={int(it['id'])}'>{h(it.get('description',''))}</a> ({h(it.get('code',''))})</li>"
+        res_html += "</ul></div>"
+
+    item_block = ""
+    if item:
+        item_block = f"""
+        <div class="card">
+          <h3>{h(item.get("description",""))} ({h(item.get("code",""))})</h3>
+          <p><b>Ubicación actual:</b> {h(item.get("location",""))}</p>
+          <form method="post" action="/encargado/inventario/gestion/cambiar_ubicacion">
+            <input type="hidden" name="item_id" value="{int(item['id'])}"/>
+            <label>Nueva ubicación</label>
+            <select name="location_id" required>{inv_locations_options(int(item.get("location_id") or 0))}</select>
+            <div style="margin-top:10px;">
+              <button class="btn" type="submit">Guardar</button>
+            </div>
+          </form>
+        </div>
+        """
+
+    body = f"""
+    <div class="top">
+      <div><h2>Cambio de ubicación de artículo</h2></div>
+      <div><a class="btn2" href="/encargado/inventario/gestion">Volver</a></div>
+    </div>
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+
+    <div class="card">
+      <form method="get">
+        <label>Buscar por descripción</label>
+        <div class="row">
+          <input name="q" value="{h(q)}"/>
+          <button class="btn2" type="submit">Buscar</button>
+        </div>
+      </form>
+    </div>
+
+    {res_html}
+    {item_block}
+    """
+    return page("Cambio ubicación", body)
+
+
+@app.post("/encargado/inventario/gestion/cambiar_ubicacion")
+def inv_change_loc_submit(request: Request, item_id: int = Form(...), location_id: int = Form(...)):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] not in ("ENCARGADO","TECNICO"):
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    db_exec_safe("update public.wom_inv_items set location_id=%s, updated_at=now() where id=%s;", (int(location_id), int(item_id)), label="inv_change_loc")
+    return RedirectResponse(f"/encargado/inventario/gestion/cambiar_ubicacion?item_id={int(item_id)}&msg=Ubicación%20actualizada", status_code=303)
+
+
+# ---- JEFES: solo consulta ----
+
+@app.get("/jefe/inventario/consulta", response_class=HTMLResponse)
+def jefe_inv_consulta(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "JEFE":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    mode = request.query_params.get("mode","articulo")
+    q = request.query_params.get("q","")
+    loc = request.query_params.get("loc","")
+    msg = request.query_params.get("msg","")
+
+    content = ""
+    if mode == "articulo" and q:
+        res = inv_search_items(q)
+        if not res:
+            content = "<div class='card'>No se encontraron artículos.</div>"
+        else:
+            lis = ""
+            for it in res:
+                lis += f"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b> — {h(it.get('location',''))}</li>"
+            content = f"<div class='card'><ul>{lis}</ul></div>"
+    elif mode == "ubicacion" and loc and loc != "ALL":
+        rows = db_all(
+            "select i.code,i.description,i.stock,l.name as location from public.wom_inv_items i join public.wom_inv_locations l on l.id=i.location_id where i.active=true and l.id=%s order by i.description;",
+            (int(loc),),
+        )
+        if not rows:
+            content = "<div class='card'>No hay artículos en esa ubicación.</div>"
+        else:
+            trs = ""
+            for it in rows:
+                trs += f"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}</td></tr>"
+            content = f"""
+            <div class="card">
+              <table>
+                <thead><tr><th>Código</th><th>Artículo</th><th style='text-align:right'>Stock</th></tr></thead>
+                <tbody>{trs}</tbody>
+              </table>
+            </div>
+            """
+    elif mode == "ubicacion" and loc == "ALL":
+        rows = db_all(
+            "select l.name as location, i.code,i.description,i.stock from public.wom_inv_items i join public.wom_inv_locations l on l.id=i.location_id where i.active=true order by l.name, i.description;",
+        )
+        if not rows:
+            content = "<div class='card'>No hay artículos.</div>"
+        else:
+            trs = ""
+            for it in rows:
+                trs += f"<tr><td>{h(it.get('location',''))}</td><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}</td></tr>"
+            content = f"""
+            <div class="card">
+              <table>
+                <thead><tr><th>Ubicación</th><th>Código</th><th>Artículo</th><th style='text-align:right'>Stock</th></tr></thead>
+                <tbody>{trs}</tbody>
+              </table>
+            </div>
+            """
+
+    body = f"""
+    <div class="top">
+      <div><h2>Consulta de Inventario</h2></div>
+      <div><a class="btn2" href="/jefe">Volver</a></div>
+    </div>
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+
+    <div class="card">
+      <div class="row" style="gap:10px; flex-wrap:wrap;">
+        <a class="btn2" href="/jefe/inventario/consulta?mode=articulo">Consulta por artículo</a>
+        <a class="btn2" href="/jefe/inventario/consulta?mode=ubicacion">Consulta por ubicación</a>
+      </div>
+      <hr/>
+      <form method="get" action="/jefe/inventario/consulta">
+        <input type="hidden" name="mode" value="{h(mode)}"/>
+        {"<label>Buscar por descripción</label><input name='q' value='"+h(q)+"'/>" if mode=="articulo" else ""}
+        {"<label>Ubicación</label><select name='loc'>"+inv_locations_options(int(loc) if loc and loc.isdigit() else None, include_all=True)+"</select>" if mode=="ubicacion" else ""}
+        <div style="margin-top:10px;">
+          <button class="btn" type="submit">Consultar</button>
+        </div>
+      </form>
+    </div>
+
+    {content}
+    """
+    return page("Consulta Inventario", body)
+
+
+
