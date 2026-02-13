@@ -1076,8 +1076,10 @@ def require_login(request: Request):
 
 def role_home_path(role: str) -> str:
     role = (role or "").upper()
-    if role == "ENCARGADO" or role == "TECNICO":
+    if role == "ENCARGADO":
         return "/encargado"
+    if role == "TECNICO":
+        return "/tecnico"
     if role == "JEFE":
         return "/jefe"
     return "/trabajador"
@@ -1210,7 +1212,7 @@ def login_page(request: Request):
     body = '''
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-      <p class="muted"><i>Version 2.1 Febrero 2026</i></p>
+      <p class="muted"><i>Version 2.6.1 Febrero 2026</i></p>
       <form method="post" action="/login">
         <label>Código personal</label>
         <input name="codigo" placeholder="Ej: A123B" autocomplete="off"/>
@@ -1220,10 +1222,10 @@ def login_page(request: Request):
       </form>
 
       <p class="muted" style="margin-top:14px; font-style:italic; font-size:0.92em;">
-        *** Novedades de la Versión 2.1 ***<br/><br/>
-        - Nueva corrección de errores de creación de formularios<br/>
-        - Ahora los trabajadores pueden añadir IMÁGENES a los partes<br/>
-        - Nuevas opciones de registro en el menú de encargado y en PDFs
+        *** Novedades de la Versión 2.6.1 ***<br/><br/>
+        - Nueva corrección de errores en partes con imágenes<br/>
+        - Nueva utilidad de INVENTARIO para Técnicos y Encargado<br/>
+        - Nuevos PDFs que generar
       </p>
     </div>
     '''
@@ -1276,7 +1278,7 @@ def worker_menu(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "TRABAJADOR":
+    if u["rol"] not in ("TRABAJADOR","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = f"""
@@ -1296,7 +1298,37 @@ def worker_menu(request: Request):
       </div>
     </div>
     """
-    return page("Trabajador", body)
+    
+@app.get("/tecnico", response_class=HTMLResponse)
+def tecnico_menu(request: Request):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u["rol"] != "TECNICO":
+        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+
+    body = f"""
+    <div class="top">
+      <div>
+        <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
+        <p>Hola <b>{h(u["nombre"])}</b>! (Técnico)</p>
+      </div>
+      <div><a class="btn2" href="/logout">Salir</a></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <a class="btn" href="/trabajador/nuevo">Crear nuevo parte</a>
+        <a class="btn" href="/trabajador/activos">Ver partes en proceso</a>
+        <a class="btn" href="/trabajador/finalizados">Ver partes finalizados</a>
+        <a class="btn" href="/encargado/inventario">Inventario de Almacén</a>
+      </div>
+    </div>
+    """
+    return page("Técnico", body)
+
+return page("Trabajador", body)
 
 
 @app.get("/trabajador/nuevo", response_class=HTMLResponse)
@@ -1305,7 +1337,7 @@ def worker_new_form(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "TRABAJADOR":
+    if u["rol"] not in ("TRABAJADOR","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     ref = generar_referencia()
@@ -1396,7 +1428,7 @@ def worker_new_submit(
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "TRABAJADOR":
+    if u["rol"] not in ("TRABAJADOR","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     ref = (referencia or "").strip().upper()
@@ -1517,7 +1549,7 @@ def worker_activos(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "TRABAJADOR":
+    if u["rol"] not in ("TRABAJADOR","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all(
@@ -1567,7 +1599,7 @@ def worker_finalizados(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "TRABAJADOR":
+    if u["rol"] not in ("TRABAJADOR","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     now = now_madrid()
@@ -1601,7 +1633,7 @@ def worker_finalizados_post(request: Request, mes: int = Form(...), anio: int = 
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] != "TRABAJADOR":
+    if u["rol"] not in ("TRABAJADOR","TECNICO"):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     mval = int(mes)
@@ -1685,6 +1717,7 @@ def jefe_menu(request: Request):
         <a class="btn" href="/jefe/en_proceso">Ver listado de partes en activo</a>
         <a class="btn" href="/jefe/finalizados">Ver listado de partes finalizados</a>
         <a class="btn" href="/jefe/consulta_en_proceso">Consulta de partes en proceso</a>
+        <a class="btn" href="/jefe/inventario/consulta">Consultar Inventario</a>
       </div>
     </div>
     """
@@ -2035,7 +2068,7 @@ def admin_menu(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     row = db_one(
@@ -2095,7 +2128,7 @@ def admin_pendientes(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rows = db_all(
@@ -2145,7 +2178,7 @@ def admin_finalizados(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     now = now_madrid()
@@ -2226,7 +2259,7 @@ def admin_mark_visto(request: Request, ref: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     update_ticket(ref, "visto_por_encargado=true", ())
@@ -2239,7 +2272,7 @@ def admin_set_estado(request: Request, ref: str, estado: str = Form(...)):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     est = (estado or "").strip()
@@ -2259,7 +2292,7 @@ def admin_set_priority(request: Request, ref: str, priority: str = Form("MEDIO")
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     pr = (priority or "MEDIO").strip().upper()
@@ -2275,7 +2308,7 @@ def admin_set_obs(request: Request, ref: str, obs: str = Form("")):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     update_ticket(ref, "observaciones_encargado=%s, visto_por_encargado=true", ((obs or "").strip(),))
@@ -2291,7 +2324,7 @@ def admin_gestion_partes(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = """
@@ -2318,7 +2351,7 @@ def admin_visualizar_en_proceso_form(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas = get_salas()
@@ -2348,7 +2381,7 @@ def admin_visualizar_en_proceso_result(request: Request, salas: List[str] = Form
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas_filtro = sanitize_salas_selection(salas)
@@ -2371,7 +2404,7 @@ def admin_pdf_form(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas = get_salas()
@@ -2401,7 +2434,7 @@ def admin_pdf_generate(request: Request, salas: List[str] = Form([])):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas_filtro = sanitize_salas_selection(salas)
@@ -2418,7 +2451,7 @@ def admin_eliminar_partes_menu(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = """
@@ -2444,7 +2477,7 @@ def admin_eliminar_partes_lista(request: Request, tipo: str = "pendientes"):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     finalizados = (tipo or "").lower() == "finalizados"
@@ -2505,7 +2538,7 @@ def admin_eliminar_partes_confirmar(request: Request, ref: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = f"""
@@ -2530,7 +2563,7 @@ def admin_eliminar_partes_do(request: Request, ref: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     rref = (ref or "").strip().upper()
@@ -2551,7 +2584,7 @@ def admin_gestion_usuarios(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = """
@@ -2578,7 +2611,7 @@ def admin_listar_usuarios(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     msg = request.query_params.get("msg", "")
@@ -2640,7 +2673,7 @@ def admin_cambiar_rol(request: Request, code: str = Form(...), role: str = Form(
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     code = (code or "").strip().upper()
@@ -2663,7 +2696,7 @@ def admin_crear_usuario_form(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     body = """
@@ -2707,7 +2740,7 @@ def admin_crear_usuario_do(
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     c = (codigo or "").strip().upper()
@@ -2743,7 +2776,7 @@ def admin_eliminar_usuario_lista(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     users = db_all("select code, name, role from public.wom_users order by role, name;")
@@ -2784,7 +2817,7 @@ def admin_eliminar_usuario_confirmar(request: Request, code: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     code = (code or "").strip().upper()
@@ -2824,7 +2857,7 @@ def admin_eliminar_usuario_confirmar_post(request: Request, code: str):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     code = (code or "").strip().upper()
@@ -2846,7 +2879,7 @@ def admin_salas(request: Request):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     salas = get_salas()
@@ -2884,7 +2917,7 @@ def admin_salas_add(request: Request, sala: str = Form(...)):
     if r:
         return r
     u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
+    if u["rol"] not in ("ENCARGADO",):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     s = (sala or "").strip()
