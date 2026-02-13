@@ -1212,7 +1212,7 @@ def login_page(request: Request):
     body = '''
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-      <p class="muted"><i>Version 2.6.1 Febrero 2026</i></p>
+      <p class="muted"><i>Version 2.1 Febrero 2026</i></p>
       <form method="post" action="/login">
         <label>Código personal</label>
         <input name="codigo" placeholder="Ej: A123B" autocomplete="off"/>
@@ -1222,10 +1222,10 @@ def login_page(request: Request):
       </form>
 
       <p class="muted" style="margin-top:14px; font-style:italic; font-size:0.92em;">
-        *** Novedades de la Versión 2.6.1 ***<br/><br/>
-        - Nueva corrección de errores en partes con imágenes<br/>
-        - Nueva utilidad de INVENTARIO para Técnicos y Encargado<br/>
-        - Nuevos PDFs que generar
+        *** Novedades de la Versión 2.1 ***<br/><br/>
+        - Nueva corrección de errores de creación de formularios<br/>
+        - Ahora los trabajadores pueden añadir IMÁGENES a los partes<br/>
+        - Nuevas opciones de registro en el menú de encargado y en PDFs
       </p>
     </div>
     '''
