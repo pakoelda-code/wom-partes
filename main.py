@@ -1298,6 +1298,7 @@ def worker_menu(request: Request):
       </div>
     </div>
     """
+    return page("Trabajador", body)
     
 @app.get("/tecnico", response_class=HTMLResponse)
 def tecnico_menu(request: Request):
@@ -1328,7 +1329,6 @@ def tecnico_menu(request: Request):
     """
     return page("Técnico", body)
 
-return page("Trabajador", body)
 
 
 @app.get("/trabajador/nuevo", response_class=HTMLResponse)
@@ -4470,5 +4470,4 @@ def jefe_inv_consulta(request: Request):
     {content}
     """
     return page("Consulta Inventario", body)
-
 
