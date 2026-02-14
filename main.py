@@ -4481,6 +4481,7 @@ def jefe_inv_consulta(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     mode = request.query_params.get("mode","articulo")
+    next_url = str(request.url)
     q = request.query_params.get("q","")
     loc = request.query_params.get("loc","")
     msg = request.query_params.get("msg","")
