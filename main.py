@@ -3559,6 +3559,11 @@ def inv_add_item_form(request: Request):
         return RedirectResponse(role_home_path(u["rol"]), status_code=303)
 
     msg = request.query_params.get("msg","")
+
+    # URL de retorno para que el ajuste de stock vuelva a esta misma consulta
+    next_url = request.url.path
+    if request.url.query:
+        next_url = f"{next_url}?{request.url.query}"
     body = f"""
     <div class="top">
       <div><h2>Añadir Artículo</h2></div>
@@ -3888,6 +3893,11 @@ def inv_consulta(request: Request):
     q = request.query_params.get("q","")
     loc = request.query_params.get("loc","")
     msg = request.query_params.get("msg","")
+
+    # URL de retorno para que el ajuste de stock vuelva a esta misma consulta
+    next_url = request.url.path
+    if request.url.query:
+        next_url = f"{next_url}?{request.url.query}"
 
     content = ""
     if mode == "articulo" and q:
