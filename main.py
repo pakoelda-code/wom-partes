@@ -3897,7 +3897,7 @@ def inv_consulta(request: Request):
         else:
             lis = ""
             for it in res:
-                lis += f\"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>\"
+                lis += f"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>"
             content = f"<div class='card'><ul>{lis}</ul></div>"
     elif mode == "ubicacion" and loc and loc != "ALL":
         rows = db_all(
@@ -3909,7 +3909,7 @@ def inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f\"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>\"
+                trs += f"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>"
             content = f"""
             <div class="card">
               <table>
@@ -4483,7 +4483,7 @@ def jefe_inv_consulta(request: Request):
         else:
             lis = ""
             for it in res:
-                lis += f\"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>\"
+                lis += f"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>"
             content = f"<div class='card'><ul>{lis}</ul></div>"
     elif mode == "ubicacion" and loc and loc != "ALL":
         rows = db_all(
@@ -4495,7 +4495,7 @@ def jefe_inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f\"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>\"
+                trs += f"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>"
             content = f"""
             <div class="card">
               <table>
