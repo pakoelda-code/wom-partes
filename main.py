@@ -2931,7 +2931,7 @@ def admin_salas_add(request: Request, sala: str = Form(...)):
 # =========================
 def _workers_for_hours() -> List[Dict[str, str]]:
     rows = db_all(
-        "select code, name, role from public.wom_users where role in ('TRABAJADOR','ENCARGADO') order by name asc;"
+        "select code, name, role from public.wom_users where role in ('TRABAJADOR','TECNICO') order by name asc;"
     )
     return [{"code": r["code"], "name": r["name"], "role": r["role"]} for r in rows]
 
@@ -3766,7 +3766,7 @@ def inv_mov_submit(
     if move_type not in ("ENTRADA","SALIDA") or qty <= 0:
         return RedirectResponse("/encargado/inventario/mov?msg=Datos%20no%20válidos", status_code=303)
 
-    conn = get_conn()
+    conn = db_conn()
     try:
         with conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -3796,6 +3796,85 @@ def inv_mov_submit(
             pass
 
 
+
+
+def _inv_adjust_form(item_id: int, next_url: str) -> str:
+    nu = (next_url or "/encargado/inventario/consulta").strip()
+    if not nu.startswith("/"):
+        nu = "/encargado/inventario/consulta"
+    return f"""
+    <form method='post' action='/inventario/adjust' style='display:inline-flex;gap:6px;align-items:center;margin-left:8px'>
+      <input type='hidden' name='item_id' value='{int(item_id)}' />
+      <input type='hidden' name='next_url' value='{h(nu)}' />
+      <input name='delta' type='number' step='1' style='width:80px' placeholder='+/-' />
+      <button class='btn2' type='submit'>Ajustar</button>
+    </form>
+    """
+
+
+@app.post("/inventario/adjust")
+def inv_adjust_submit(
+    request: Request,
+    item_id: int = Form(...),
+    delta: int = Form(...),
+    next_url: str = Form("/encargado/inventario/consulta"),
+):
+    r = require_login(request)
+    if r:
+        return r
+    u = user_from_session(request)
+    if u.get("rol") not in ("ENCARGADO","TECNICO","JEFE"):
+        return RedirectResponse(role_home_path(u.get("rol","")), status_code=303)
+
+    try:
+        delta_i = int(delta)
+    except Exception:
+        delta_i = 0
+    if delta_i == 0:
+        nu = (next_url or "/encargado/inventario/consulta").strip()
+        if not nu.startswith("/"):
+            nu = "/encargado/inventario/consulta"
+        sep = "&" if "?" in nu else "?"
+        return RedirectResponse(f"{nu}{sep}msg=Ajuste%20no%20válido", status_code=303)
+
+    move_type = "ENTRADA" if delta_i > 0 else "SALIDA"
+    qty = abs(delta_i)
+
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "select id, stock from public.wom_inv_items where id=%s and active=true for update;",
+                (int(item_id),),
+            )
+            row = cur.fetchone()
+            if not row:
+                nu = (next_url or "/encargado/inventario/consulta").strip()
+                if not nu.startswith("/"):
+                    nu = "/encargado/inventario/consulta"
+                sep = "&" if "?" in nu else "?"
+                return RedirectResponse(f"{nu}{sep}msg=Artículo%20no%20encontrado", status_code=303)
+
+            stock = int(row.get("stock") or 0)
+            new_stock = stock + qty if move_type == "ENTRADA" else stock - qty
+            if new_stock < 0:
+                nu = (next_url or "/encargado/inventario/consulta").strip()
+                if not nu.startswith("/"):
+                    nu = "/encargado/inventario/consulta"
+                sep = "&" if "?" in nu else "?"
+                return RedirectResponse(f"{nu}{sep}msg=Stock%20insuficiente", status_code=303)
+
+            cur.execute("update public.wom_inv_items set stock=%s, updated_at=now() where id=%s;", (new_stock, int(item_id)))
+            cur.execute(
+                "insert into public.wom_inv_moves (item_id, move_type, qty, user_code, user_name) values (%s,%s,%s,%s,%s);",
+                (int(item_id), move_type, int(qty), u.get("codigo"), u.get("nombre")),
+            )
+
+    nu = (next_url or "/encargado/inventario/consulta").strip()
+    if not nu.startswith("/"):
+        nu = "/encargado/inventario/consulta"
+    sep = "&" if "?" in nu else "?"
+    return RedirectResponse(f"{nu}{sep}msg=Stock%20actualizado", status_code=303)
+
 @app.get("/encargado/inventario/consulta", response_class=HTMLResponse)
 def inv_consulta(request: Request):
     r = require_login(request)
@@ -3818,11 +3897,11 @@ def inv_consulta(request: Request):
         else:
             lis = ""
             for it in res:
-                lis += f"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b> — {h(it.get('location',''))}</li>"
+                lis += f\"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>\"
             content = f"<div class='card'><ul>{lis}</ul></div>"
     elif mode == "ubicacion" and loc and loc != "ALL":
         rows = db_all(
-            "select i.code,i.description,i.category,i.stock,l.name as location from public.wom_inv_items i join public.wom_inv_locations l on l.id=i.location_id where i.active=true and l.id=%s order by i.description;",
+            "select i.id,i.code,i.description,i.category,i.stock,l.name as location from public.wom_inv_items i join public.wom_inv_locations l on l.id=i.location_id where i.active=true and l.id=%s order by i.description;",
             (int(loc),),
         )
         if not rows:
@@ -3830,7 +3909,7 @@ def inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}</td></tr>"
+                trs += f\"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>\"
             content = f"""
             <div class="card">
               <table>
@@ -4404,7 +4483,7 @@ def jefe_inv_consulta(request: Request):
         else:
             lis = ""
             for it in res:
-                lis += f"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b> — {h(it.get('location',''))}</li>"
+                lis += f\"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>\"
             content = f"<div class='card'><ul>{lis}</ul></div>"
     elif mode == "ubicacion" and loc and loc != "ALL":
         rows = db_all(
@@ -4416,7 +4495,7 @@ def jefe_inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}</td></tr>"
+                trs += f\"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>\"
             content = f"""
             <div class="card">
               <table>
