@@ -23,6 +23,8 @@ import urllib.error
 import urllib.parse
 import mimetypes
 import json
+import re
+import unicodedata
 from io import BytesIO
 
 # Pillow (compresión de imágenes en servidor). Si no está instalado, se mostrará un error claro al subir imágenes.
@@ -1212,7 +1214,7 @@ def login_page(request: Request):
     body = '''
     <div class="card">
       <h2>PARTES DE MANTENIMIENTO DE WOM</h2>
-      <p class="muted"><i>Version 2.2.6 Febrero 2026</i></p>
+      <p class="muted"><i>Version 2.1 Febrero 2026</i></p>
       <form method="post" action="/login">
         <label>Código personal</label>
         <input name="codigo" placeholder="Ej: A123B" autocomplete="off"/>
@@ -1222,10 +1224,10 @@ def login_page(request: Request):
       </form>
 
       <p class="muted" style="margin-top:14px; font-style:italic; font-size:0.92em;">
-        *** Novedades de la Versión 2.2.6 ***<br/><br/>
-        - Nueva corrección de errores en registros<br/>
-        - Añadida utilidad de INVENTARIO DE ALMACÉN<br/>
-        - Encargado, Jefes y Técnico podrán consultar/modificar inventario
+        *** Novedades de la Versión 2.1 ***<br/><br/>
+        - Nueva corrección de errores de creación de formularios<br/>
+        - Ahora los trabajadores pueden añadir IMÁGENES a los partes<br/>
+        - Nuevas opciones de registro en el menú de encargado y en PDFs
       </p>
     </div>
     '''
@@ -3655,20 +3657,60 @@ def inv_add_item_submit(
     return RedirectResponse(f"/encargado/inventario/add_item?msg=Articulo%20creado%20correctamente%20con%20código%20{code}", status_code=303)
 
 
-def inv_search_items(q: str, include_inactive: bool = False, limit: int = 20) -> List[Dict[str, Any]]:
-    q = (q or "").strip()
-    if not q:
+
+def _inv_norm_text(s: str) -> str:
+    s = (s or "")
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = s.lower()
+    s = " ".join(s.split())
+    return s
+
+def _inv_tokens(q: str) -> list[str]:
+    qn = _inv_norm_text(q)
+    if not qn:
         return []
-    if include_inactive:
-        return db_all(
-            "select i.id,i.code,i.description,i.category,i.stock,i.active,l.name as location from public.wom_inv_items i left join public.wom_inv_locations l on l.id=i.location_id where lower(i.description) like lower(%s) order by i.active desc, i.description limit %s;",
-            (f"%{q}%", int(limit)),
-        )
-    return db_all(
-        "select i.id,i.code,i.description,i.category,i.stock,i.active,l.name as location from public.wom_inv_items i left join public.wom_inv_locations l on l.id=i.location_id where i.active=true and lower(i.description) like lower(%s) order by i.description limit %s;",
-        (f"%{q}%", int(limit)),
+    return [t for t in re.split(r"\s+", qn) if t]
+
+def _inv_match(description: str, q: str) -> bool:
+    tokens = _inv_tokens(q)
+    if not tokens:
+        return True
+    dn = _inv_norm_text(description)
+    return all(t in dn for t in tokens)
+
+def inv_search_items(q: str, include_inactive: bool = False, limit: int = 500) -> List[Dict[str, Any]]:
+    """Búsqueda por descripción:
+    - Insensible a mayúsculas/minúsculas.
+    - Insensible a acentos (Botón == Boton).
+    - Permite buscar por partes y en cualquier orden (ej: "bot azu").
+    """
+    q = (q or "").strip()
+
+    where = "" if include_inactive else "WHERE i.active = true"
+    rows = db_all(
+        f"""
+        select
+            i.id,i.code,i.description,i.category,i.stock,i.active,
+            COALESCE(l.name,'') as location
+        from public.wom_inv_items i
+        left join public.wom_inv_locations l on l.id=i.location_id
+        {where}
+        order by i.description asc, i.code asc
+        limit 2000;
+        """
     )
 
+    if not q:
+        return rows[:int(limit)]
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        if _inv_match(r.get("description",""), q):
+            out.append(r)
+            if len(out) >= int(limit):
+                break
+    return out
 
 @app.get("/encargado/inventario/mov", response_class=HTMLResponse)
 def inv_mov_form(request: Request):
@@ -4057,32 +4099,111 @@ def inv_consulta_pdf(request: Request, loc: str = "ALL"):
 
 @app.get("/encargado/inventario/gestion", response_class=HTMLResponse)
 def inv_gestion_menu(request: Request):
-    r = require_login(request)
-    if r:
-        return r
-    u = user_from_session(request)
-    if u["rol"] not in ("ENCARGADO","TECNICO"):
-        return RedirectResponse(role_home_path(u["rol"]), status_code=303)
+    u = require_roles(request, {"ENCARGADO", "TECNICO"})
+    links = []
+    if u["rol"] == "ENCARGADO":
+        links.append('<a class="btn danger" href="/encargado/inventario/gestion/eliminar">Eliminar un artículo</a>')
+        links.append('<a class="btn" href="/encargado/inventario/gestion/editar">Editar un artículo</a>')
+    links.append('<a class="btn" href="/encargado/inventario/gestion/ubicaciones">Añadir o Eliminar Ubicaciones</a>')
+    links.append('<a class="btn" href="/encargado/inventario/gestion/moves">Consulta listado Entradas y Salidas</a>')
+    links.append('<a class="btn" href="/encargado/inventario/gestion/moves_pdf">Generar PDF Entradas y Salidas</a>')
+    links.append('<a class="btn" href="/encargado/inventario/gestion/cambiar_ubicacion">Cambio de ubicación de artículo</a>')
 
-    msg = request.query_params.get("msg","")
     body = f"""
-    <div class="top">
-      <div><h2>Gestión de Inventario</h2></div>
-      <div><a class="btn2" href="/encargado/inventario">Volver</a></div>
-    </div>
-    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
     <div class="card">
-      <div class="row">
-        <a class="btn danger" href="/encargado/inventario/gestion/eliminar">Eliminar un artículo</a>
-        <a class="btn" href="/encargado/inventario/gestion/ubicaciones">Añadir o Eliminar Ubicaciones</a>
-        <a class="btn" href="/encargado/inventario/gestion/moves">Consulta listado Entradas y Salidas</a>
-        <a class="btn" href="/encargado/inventario/gestion/moves_pdf">Generar PDF Entradas y Salidas</a>
-        <a class="btn" href="/encargado/inventario/gestion/cambiar_ubicacion">Cambio de ubicación de artículo</a>
+      <div class="row" style="justify-content:space-between; align-items:center;">
+        <h2 style="margin:0;">Gestión de Inventario</h2>
+        <a class="btn" href="/encargado/inventario">Volver</a>
+      </div>
+      <div class="grid" style="margin-top:12px;">
+        {''.join(links)}
       </div>
     </div>
     """
     return page("Gestión Inventario", body)
 
+@app.get("/encargado/inventario/gestion/editar", response_class=HTMLResponse)
+def inv_edit_item_form(request: Request):
+    u = require_roles(request, {"ENCARGADO"})
+    q = request.query_params.get("q","")
+    item_id = request.query_params.get("item_id","")
+    msg = request.query_params.get("msg","")
+
+    results = inv_search_items(q, include_inactive=True, limit=50) if q else []
+    item = None
+    if item_id:
+        try:
+            item = db_one(
+                "select id, code, description, category, stock, active from public.wom_inv_items where id=%s;",
+                (int(item_id),),
+            )
+        except Exception:
+            item = None
+
+    res_html = ""
+    if results:
+        res_html += "<div class='card'><b>Resultados:</b><ul>"
+        for it in results:
+            res_html += f"<li><a href='/encargado/inventario/gestion/editar?item_id={int(it['id'])}'>{h(it.get('description',''))}</a> ({h(it.get('code',''))})</li>"
+        res_html += "</ul></div>"
+
+    edit_block = ""
+    if item:
+        edit_block = f"""
+        <div class="card">
+          <h3>Editar: {h(item.get("description",""))} <span style="opacity:.7">({h(item.get("code",""))})</span></h3>
+          <form method="post" action="/encargado/inventario/gestion/editar">
+            <input type="hidden" name="item_id" value="{int(item['id'])}"/>
+            <label>Nueva descripción / nombre</label>
+            <input name="description" value="{h(item.get('description',''))}" required />
+            <div style="margin-top:12px;">
+              <button class="btn" type="submit">Guardar cambios</button>
+              <a class="btn2" href="/encargado/inventario/gestion">Volver</a>
+            </div>
+          </form>
+        </div>
+        """
+
+    body = f"""
+    <div class="top">
+      <div><h2>Editar un artículo</h2></div>
+      <div><a class="btn2" href="/encargado/inventario/gestion">Volver</a></div>
+    </div>
+
+    {f"<div class='msg ok'>{h(msg)}</div>" if msg else ""}
+
+    <div class="card">
+      <form method="get" action="/encargado/inventario/gestion/editar">
+        <label>Buscar artículo por descripción</label>
+        <div class="row">
+          <input name="q" value="{h(q)}" placeholder="Ej: botón, relé, cinta..." />
+          <button class="btn2" type="submit">Buscar</button>
+        </div>
+      </form>
+    </div>
+
+    {res_html}
+    {edit_block}
+    """
+    return page("Editar artículo", body)
+
+
+@app.post("/encargado/inventario/gestion/editar")
+def inv_edit_item_submit(
+    request: Request,
+    item_id: int = Form(...),
+    description: str = Form(...),
+):
+    u = require_roles(request, {"ENCARGADO"})
+    description = (description or "").strip()
+    if not description:
+        return RedirectResponse(f"/encargado/inventario/gestion/editar?item_id={int(item_id)}&msg=Descripción%20no%20válida", status_code=303)
+
+    db_exec(
+        "update public.wom_inv_items set description=%s, updated_at=now() where id=%s;",
+        (description, int(item_id)),
+    )
+    return RedirectResponse(f"/encargado/inventario/gestion/editar?item_id={int(item_id)}&msg=Artículo%20actualizado", status_code=303)
 
 @app.get("/encargado/inventario/gestion/eliminar", response_class=HTMLResponse)
 def inv_eliminar_form(request: Request):
