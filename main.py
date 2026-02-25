@@ -4557,7 +4557,10 @@ def inv_moves_pdf_download(request: Request, mes: int, anio: int):
 
 @app.get("/encargado/inventario/gestion/repo_pdf")
 def inv_repo_pdf(request: Request):
-    u = require_login(request)
+    redir = require_login(request)
+    if redir:
+        return redir
+    u = user_from_session(request) or {}
     if (u.get("role") or "").upper() not in {"ENCARGADO", "TECNICO"}:
         return RedirectResponse("/home", status_code=303)
 
