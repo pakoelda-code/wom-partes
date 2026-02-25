@@ -4561,10 +4561,8 @@ def inv_repo_pdf(request: Request):
     if not isinstance(u, dict):
         return u
 
-
-    conn = db_conn()
+    # db_all() ya gestiona su propia conexión (no se le pasa conn)
     rows = db_all(
-        conn,
         """
         SELECT
             i.id,
