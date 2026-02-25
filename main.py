@@ -3971,7 +3971,9 @@ def inv_consulta(request: Request):
         else:
             lis = ""
             for it in res:
-                lis += f"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>"
+                st = int(it.get('stock') or 0)
+                style0 = " style='color:#c00'" if st == 0 else ""
+                lis += f"<li{style0}><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{st}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>"
             content = f"<div class='card'><ul>{lis}</ul></div>"
     elif mode == "ubicacion" and loc and loc != "ALL":
         rows = db_all(
@@ -3983,7 +3985,9 @@ def inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>"
+                st = int(it.get('stock') or 0)
+                tr_style0 = " style='color:#c00'" if st == 0 else ""
+                trs += f"<tr{tr_style0}><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{st}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>"
             content = f"""
             <div class="card">
               <table>
@@ -4001,7 +4005,9 @@ def inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f"<tr><td>{h(it.get('location',''))}</td><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}</td></tr>"
+                st = int(it.get('stock') or 0)
+                tr_style0 = " style='color:#c00'" if st == 0 else ""
+                trs += f"<tr{tr_style0}><td>{h(it.get('location',''))}</td><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{st}</td></tr>"
             content = f"""
             <div class="card">
               <table>
@@ -4092,7 +4098,10 @@ def inv_consulta_pdf(request: Request, loc: str = "ALL"):
         c.line(20*mm, y, w-20*mm, y)
         y -= 5*mm
         for it in rows:
-            line = f"{(it.get('code') or ''):10} {(int(it.get('stock') or 0)):5}  {(it.get('description') or '')}"
+            st = int(it.get('stock') or 0)
+            if st == 0: c.setFillColorRGB(0.8, 0.0, 0.0)
+            else: c.setFillColorRGB(0.0, 0.0, 0.0)
+            line = f"{(it.get('code') or ''):10} {(st):5}  {(it.get('description') or '')}"
             c.drawString(20*mm, y, line[:110])
             y -= 4*mm
             if y < 20*mm:
@@ -4105,7 +4114,10 @@ def inv_consulta_pdf(request: Request, loc: str = "ALL"):
         c.line(20*mm, y, w-20*mm, y)
         y -= 5*mm
         for it in rows:
-            line = f"{(it.get('location') or ''):18} {(it.get('code') or ''):10} {(int(it.get('stock') or 0)):5}  {(it.get('description') or '')}"
+            st = int(it.get('stock') or 0)
+            if st == 0: c.setFillColorRGB(0.8, 0.0, 0.0)
+            else: c.setFillColorRGB(0.0, 0.0, 0.0)
+            line = f"{(it.get('location') or ''):18} {(it.get('code') or ''):10} {(st):5}  {(it.get('description') or '')}"
             c.drawString(20*mm, y, line[:110])
             y -= 4*mm
             if y < 20*mm:
@@ -4132,6 +4144,7 @@ def inv_gestion_menu(request: Request):
     links.append('<a class="btn" href="/encargado/inventario/gestion/moves">Consulta listado Entradas y Salidas</a>')
     links.append('<a class="btn" href="/encargado/inventario/gestion/moves_pdf">Generar PDF Entradas y Salidas</a>')
     links.append('<a class="btn" href="/encargado/inventario/gestion/cambiar_ubicacion">Cambio de ubicación de artículo</a>')
+    links.append('<a class="btn" href="/encargado/inventario/gestion/repo_pdf">Generar PDF de reposición</a>')
 
     body = f"""
     <div class="card">
@@ -4541,6 +4554,72 @@ def inv_moves_pdf_download(request: Request, mes: int, anio: int):
     return Response(content=pdf, media_type="application/pdf", headers=headers)
 
 
+
+@app.get("/encargado/inventario/gestion/repo_pdf")
+def inv_repo_pdf(request: Request):
+    u = require_login(request)
+    if (u.get("role") or "").upper() not in {"ENCARGADO", "TECNICO"}:
+        return RedirectResponse("/home", status_code=303)
+
+    conn = db_conn()
+    rows = db_all(
+        conn,
+        """
+        SELECT
+            i.id,
+            i.code,
+            i.description,
+            i.category,
+            COALESCE(i.stock, 0) AS stock,
+            COALESCE(l.name, '') AS location
+        FROM wom_inv_items i
+        LEFT JOIN wom_inv_locations l ON l.id = i.location_id
+        WHERE i.active = 1 AND COALESCE(i.stock, 0) = 0
+        ORDER BY i.category, i.code
+        """,
+    )
+
+    from io import BytesIO
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+
+    def header():
+        c.setFillColorRGB(0.0, 0.0, 0.0)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(40, h - 50, "PDF de reposición (Stock 0)")
+        c.setFont("Helvetica", 10)
+        c.drawString(40, h - 70, datetime.now().strftime("%d/%m/%Y %H:%M"))
+        yy = h - 110
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(40, yy, "Código")
+        c.drawString(110, yy, "Descripción")
+        c.drawString(360, yy, "Categoría")
+        c.drawString(460, yy, "Ubicación")
+        c.setFont("Helvetica", 8)
+        return yy - 14
+
+    y = header()
+    for it in rows:
+        if y < 50:
+            c.showPage()
+            y = header()
+        c.setFillColorRGB(0.8, 0.0, 0.0)
+        c.drawString(40, y, str(it.get("code", "")))
+        c.drawString(110, y, str(it.get("description", ""))[:55])
+        c.drawString(360, y, str(it.get("category", "")))
+        c.drawString(460, y, str(it.get("location", "")))
+        y -= 11
+
+    c.save()
+    pdf = buf.getvalue()
+    headers = {"Content-Disposition": "inline; filename=reposicion_stock0.pdf"}
+    return Response(content=pdf, media_type="application/pdf", headers=headers)
+
+
 @app.get("/encargado/inventario/gestion/cambiar_ubicacion", response_class=HTMLResponse)
 def inv_change_loc_form(request: Request):
     r = require_login(request)
@@ -4643,7 +4722,9 @@ def jefe_inv_consulta(request: Request):
         else:
             lis = ""
             for it in res:
-                lis += f"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>"
+                st = int(it.get('stock') or 0)
+                style0 = " style='color:#c00'" if st == 0 else ""
+                lis += f"<li{style0}><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{st}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>"
             content = f"<div class='card'><ul>{lis}</ul></div>"
     elif mode == "ubicacion" and loc and loc != "ALL":
         rows = db_all(
@@ -4655,7 +4736,9 @@ def jefe_inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>"
+                st = int(it.get('stock') or 0)
+                tr_style0 = " style='color:#c00'" if st == 0 else ""
+                trs += f"<tr{tr_style0}><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{st}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>"
             content = f"""
             <div class="card">
               <table>
@@ -4673,7 +4756,9 @@ def jefe_inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f"<tr><td>{h(it.get('location',''))}</td><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}</td></tr>"
+                st = int(it.get('stock') or 0)
+                tr_style0 = " style='color:#c00'" if st == 0 else ""
+                trs += f"<tr{tr_style0}><td>{h(it.get('location',''))}</td><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{st}</td></tr>"
             content = f"""
             <div class="card">
               <table>
@@ -5035,7 +5120,9 @@ def jefe_inv_consulta(request: Request):
         else:
             lis = ""
             for it in res:
-                lis += f"<li><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{int(it.get('stock') or 0)}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>"
+                st = int(it.get('stock') or 0)
+                style0 = " style='color:#c00'" if st == 0 else ""
+                lis += f"<li{style0}><b>{h(it.get('description',''))}</b> ({h(it.get('code',''))}) — Stock: <b>{st}</b>{_inv_adjust_form(int(it.get('id') or 0), next_url)} — {h(it.get('location',''))}</li>"
             content = f"<div class='card'><ul>{lis}</ul></div>"
     elif mode == "ubicacion" and loc and loc != "ALL":
         rows = db_all(
@@ -5047,7 +5134,9 @@ def jefe_inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f"<tr><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>"
+                st = int(it.get('stock') or 0)
+                tr_style0 = " style='color:#c00'" if st == 0 else ""
+                trs += f"<tr{tr_style0}><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{st}{_inv_adjust_form(int(it.get('id') or 0), next_url)}</td></tr>"
             content = f"""
             <div class="card">
               <table>
@@ -5065,7 +5154,9 @@ def jefe_inv_consulta(request: Request):
         else:
             trs = ""
             for it in rows:
-                trs += f"<tr><td>{h(it.get('location',''))}</td><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{int(it.get('stock') or 0)}</td></tr>"
+                st = int(it.get('stock') or 0)
+                tr_style0 = " style='color:#c00'" if st == 0 else ""
+                trs += f"<tr{tr_style0}><td>{h(it.get('location',''))}</td><td>{h(it.get('code',''))}</td><td>{h(it.get('description',''))}</td><td style='text-align:right'>{st}</td></tr>"
             content = f"""
             <div class="card">
               <table>
@@ -5101,4 +5192,3 @@ def jefe_inv_consulta(request: Request):
     {content}
     """
     return page("Consulta Inventario", body)
-
