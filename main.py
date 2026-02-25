@@ -4573,7 +4573,7 @@ def inv_repo_pdf(request: Request):
             COALESCE(l.name, '') AS location
         FROM wom_inv_items i
         LEFT JOIN wom_inv_locations l ON l.id = i.location_id
-        WHERE i.active = 1 AND COALESCE(i.stock, 0) = 0
+        WHERE i.active IS TRUE AND COALESCE(i.stock, 0) = 0
         ORDER BY i.category, i.code
         """,
     )
